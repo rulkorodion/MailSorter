@@ -16,7 +16,7 @@ from mailsorter.llm_client import LlmClient, LlmError
 from mailsorter.manager import SorterManager
 from mailsorter.sorter import MailSorter, resolve_destination
 from mailsorter.webapp import app
-from tests.test_safety import FakeImap
+from tests.test_safety import FakeImap, FakeMoveJournal
 
 
 REFUSAL = json.dumps({
@@ -67,10 +67,13 @@ class AmbiguousDecisionTests(unittest.TestCase):
         ParsedFakeLlm.failure = None
         self.imap_patch = patch("mailsorter.sorter.ImapClient", FakeImap)
         self.llm_patch = patch("mailsorter.sorter.LlmClient", ParsedFakeLlm)
+        self.journal_patch = patch("mailsorter.sorter.MoveJournal", FakeMoveJournal)
         self.imap_patch.start()
         self.llm_patch.start()
+        self.journal_patch.start()
         self.addCleanup(self.imap_patch.stop)
         self.addCleanup(self.llm_patch.stop)
+        self.addCleanup(self.journal_patch.stop)
 
     def test_ambiguous_letter_plans_configured_unsorted_without_mutation(self):
         for provider in ("ollama", "cloudru"):
@@ -190,10 +193,13 @@ class AmbiguousWebTests(unittest.TestCase):
         sorter.stats.planned = 1
         sorter.stats.planned_unsorted = 1
         sorter.stats.unsorted = 0
+        sorter.stats.move_unknown = 1
+        sorter.stats.pending_review = 1
         manager = SorterManager()
         manager.sorters["synthetic.yaml"] = sorter
         status = manager.get_status()[0]
         self.assertEqual((status["planned_unsorted"], status["unsorted"]), (1, 0))
+        self.assertEqual((status["move_unknown"], status["pending_review"]), (1, 1))
 
         auth = base64.b64encode(b"admin:offline-password").decode()
         with patch("mailsorter.webapp.is_setup_mode", return_value=False), \
@@ -208,9 +214,13 @@ class AmbiguousWebTests(unittest.TestCase):
         self.assertEqual((overview.status_code, run.status_code), (200, 200))
         self.assertIn("В Unsorted запланировано: 1", overview.text)
         self.assertIn("В Unsorted перемещено: 0", overview.text)
+        self.assertIn("Результат MOVE не определён: 1", overview.text)
+        self.assertIn("Требуют проверки: 1", overview.text)
         self.assertRegex(run.text, r"В Unsorted запланировано:\s*<strong>1</strong>")
         self.assertRegex(run.text, r"В Unsorted перемещено:\s*<strong>0</strong>")
         self.assertIn("s.planned_unsorted", run.text)
+        self.assertIn("s.move_unknown", run.text)
+        self.assertIn("s.pending_review", run.text)
 
     def test_manual_test_shows_planned_configured_folder_without_imap(self):
         cfg = mailbox_config()

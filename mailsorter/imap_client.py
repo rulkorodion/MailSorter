@@ -8,9 +8,11 @@ import re
 import socket
 import ssl
 import time
+from dataclasses import dataclass
 from typing import Any
+from collections.abc import Callable
 
-from imap_tools import MailBox, MailMessage
+from imap_tools import AND, Header, MailBox, MailMessage
 
 from .config import ImapConfig
 
@@ -19,6 +21,39 @@ logger = logging.getLogger("mailsorter.imap")
 
 MAX_DNS_ADDRESSES = 8
 MAX_ADDRESS_SECONDS = 10
+
+
+@dataclass(frozen=True)
+class MoveResult:
+    evidence: str  # server_ok or verified_after_error
+    error_type: str | None = None
+
+
+class MoveNotStartedError(RuntimeError):
+    def __init__(self, stage: str, error_type: str):
+        self.stage = stage
+        self.error_type = error_type
+        super().__init__(f"IMAP MOVE не начат: {stage} ({error_type})")
+
+
+class MoveUncertainError(RuntimeError):
+    def __init__(self, stage: str, error_type: str):
+        self.stage = stage
+        self.error_type = error_type
+        super().__init__(f"Результат IMAP MOVE не определён: {stage} ({error_type})")
+
+
+def _single_header(msg: MailMessage, name: str) -> str | None:
+    values = msg.headers.get(name) or msg.headers.get(name.lower()) or ()
+    return str(values[0]).strip() if len(values) == 1 and values[0] else None
+
+
+def _message_identity(msg: MailMessage) -> tuple[str, int, str | None, str | None] | None:
+    message_id = _single_header(msg, "Message-ID")
+    size = getattr(msg, "size_rfc822", 0)
+    if not message_id or not isinstance(size, int) or size <= 0:
+        return None
+    return message_id, size, _single_header(msg, "Date"), _single_header(msg, "From")
 
 
 def _make_ssl_context() -> ssl.SSLContext:
@@ -85,6 +120,12 @@ class ImapClient:
         self.protected_folders = protected_folders or []
         self._mailbox: MailBox | None = None
         self._folder_delimiter: str = "/"
+        self._selected_folder: str | None = None
+        self._selected_uidvalidity: int | None = None
+
+    @property
+    def selected_uidvalidity(self) -> int | None:
+        return self._selected_uidvalidity
 
     def __enter__(self) -> "ImapClient":
         self.connect()
@@ -212,6 +253,7 @@ class ImapClient:
             self.cfg.inbox_folder = inbox
         try:
             self._mailbox.folder.set(self.cfg.inbox_folder)
+            self._remember_selected_folder(self.cfg.inbox_folder)
         except Exception as e:
             available = ", ".join(folders[:30]) or "(пусто)"
             self.disconnect()
@@ -223,9 +265,15 @@ class ImapClient:
         if self._mailbox:
             try:
                 self._mailbox.logout()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("IMAP stage=logout error_type=%s", type(exc).__name__)
+                try:
+                    self._mailbox.client.shutdown()
+                except Exception:
+                    pass
             self._mailbox = None
+            self._selected_folder = None
+            self._selected_uidvalidity = None
 
     @property
     def mailbox(self) -> MailBox:
@@ -296,15 +344,132 @@ class ImapClient:
                 f"Папка «{folder}» не найдена. Доступные: {', '.join(existing[:25])}"
             )
         self.mailbox.folder.set(actual)
+        self._remember_selected_folder(actual)
         return list(self.mailbox.fetch(limit=limit, reverse=True, mark_seen=False))
 
-    def move_message(self, msg: MailMessage, target_folder: str) -> None:
-        actual = self.ensure_folder(target_folder)
-        self.mailbox.move(msg.uid, actual)
-        logger.info(
-            "Перемещено uid=%s → %s",
-            msg.uid, actual,
-        )
+    def _remember_selected_folder(self, actual: str) -> None:
+        self._selected_folder = actual
+        try:
+            responses = self.mailbox.client.untagged_responses
+            selected = responses.get("UIDVALIDITY", [None])[0] if isinstance(responses, dict) else None
+            self._selected_uidvalidity = int(selected) if selected is not None else None
+            if self._selected_uidvalidity is None:
+                self._selected_uidvalidity = self.mailbox.folder.status(
+                    actual, options=("UIDVALIDITY",),
+                ).get("UIDVALIDITY")
+        except Exception as exc:
+            self._selected_uidvalidity = None
+            logger.warning("IMAP stage=source_uidvalidity error_type=%s", type(exc).__name__)
+
+    def move_message(self, msg: MailMessage, target_folder: str,
+                     before_command: Callable[[], None] | None = None) -> MoveResult:
+        """Never retry a possibly executed MOVE; verify by identity on a new read-only session."""
+        uid = str(msg.uid or "")
+        if not uid.isdigit():
+            raise MoveNotStartedError("validate_uid", "InvalidUID")
+        source = self._selected_folder
+        if not source:
+            raise MoveNotStartedError("validate_source", "UnknownSource")
+        try:
+            actual = self.ensure_folder(target_folder)
+        except Exception as exc:
+            logger.warning("IMAP stage=prepare_destination uid=%s target=%s error_type=%s",
+                           uid, target_folder, type(exc).__name__)
+            raise MoveNotStartedError("prepare_destination", type(exc).__name__) from exc
+
+        baseline: dict[str, int] = {}
+        try:
+            baseline = self.mailbox.folder.status(
+                actual, options=("UIDVALIDITY", "UIDNEXT"),
+            )
+        except imaplib.IMAP4.abort as exc:
+            logger.warning("IMAP stage=target_baseline uid=%s target=%s error_type=%s",
+                           uid, actual, type(exc).__name__)
+            raise MoveNotStartedError("target_baseline", type(exc).__name__) from exc
+        except Exception as exc:
+            logger.warning("IMAP stage=target_baseline uid=%s target=%s error_type=%s",
+                           uid, actual, type(exc).__name__)
+
+        method = "MOVE" if "MOVE" in self.mailbox.client.capabilities else "COPY_STORE_EXPUNGE"
+        if before_command is not None:
+            try:
+                before_command()
+            except Exception as exc:
+                logger.error("IMAP stage=journal_pending uid=%s target=%s error_type=%s",
+                             uid, actual, type(exc).__name__)
+                raise MoveNotStartedError("journal_pending", type(exc).__name__) from exc
+
+        logger.info("IMAP stage=move_command uid=%s target=%s method=%s", uid, actual, method)
+        try:
+            self.mailbox.move(uid, actual)
+        except Exception as exc:
+            error_type = type(exc).__name__
+            logger.warning("IMAP stage=move_command uid=%s target=%s method=%s error_type=%s",
+                           uid, actual, method, error_type)
+            try:
+                verified = self._verify_move(msg, source, actual, self._selected_uidvalidity, baseline)
+            except Exception as verify_exc:
+                logger.warning("IMAP stage=verify_move uid=%s target=%s error_type=%s",
+                               uid, actual, type(verify_exc).__name__)
+                verified = False
+            if verified:
+                logger.warning("IMAP stage=verify_move uid=%s target=%s result=confirmed error_type=%s",
+                               uid, actual, error_type)
+                return MoveResult("verified_after_error", error_type)
+            logger.error("IMAP stage=verify_move uid=%s target=%s result=unknown error_type=%s",
+                         uid, actual, error_type)
+            raise MoveUncertainError("move_command", error_type) from exc
+
+        logger.info("IMAP stage=move_confirmed uid=%s target=%s evidence=server_ok", uid, actual)
+        return MoveResult("server_ok")
+
+    def _verify_move(self, msg: MailMessage, source: str, target: str,
+                     source_uidvalidity: int | None, baseline: dict[str, int]) -> bool:
+        identity = _message_identity(msg)
+        target_validity = baseline.get("UIDVALIDITY")
+        target_next = baseline.get("UIDNEXT")
+        if (identity is None or not isinstance(source_uidvalidity, int) or source_uidvalidity <= 0
+                or not isinstance(target_validity, int) or target_validity <= 0
+                or not isinstance(target_next, int) or target_next <= 0):
+            return False
+        uid = str(msg.uid)
+        try:
+            with ImapClient(self.cfg) as checker:
+                mailbox = checker.mailbox
+                source_status = mailbox.folder.status(source, options=("UIDVALIDITY",))
+                if source_status.get("UIDVALIDITY") != source_uidvalidity:
+                    return False
+                mailbox.folder.set(source, readonly=True)
+                if uid in mailbox.uids(AND(uid=uid), charset=None):
+                    return False
+
+                target_status = mailbox.folder.status(target, options=("UIDVALIDITY",))
+                if target_status.get("UIDVALIDITY") != target_validity:
+                    return False
+                mailbox.folder.set(target, readonly=True)
+                candidates = mailbox.uids(
+                    AND(header=Header("Message-ID", identity[0])), charset=None,
+                )
+                new_uids = [candidate for candidate in candidates
+                            if candidate.isdigit() and int(candidate) >= target_next]
+                if len(new_uids) != 1:
+                    return False
+                matches = list(mailbox.fetch(
+                    uid_list=new_uids, headers_only=True, mark_seen=False,
+                ))
+                if (len(matches) != 1 or str(matches[0].uid) != new_uids[0]
+                        or _message_identity(matches[0]) != identity):
+                    return False
+                if mailbox.folder.status(target, options=("UIDVALIDITY",)).get("UIDVALIDITY") != target_validity:
+                    return False
+                mailbox.folder.set(source, readonly=True)
+                if mailbox.folder.status(source, options=("UIDVALIDITY",)).get("UIDVALIDITY") != source_uidvalidity:
+                    return False
+                return uid not in mailbox.uids(AND(uid=uid), charset=None)
+        except Exception as exc:
+            logger.warning("IMAP stage=verify_move uid=%s target=%s error_type=%s",
+                           uid, target, type(exc).__name__)
+            return False
 
     def create_folder(self, folder: str) -> str:
         return self.ensure_folder(folder)

@@ -34,6 +34,8 @@
     Запланировано: <strong>{{ s.planned }}</strong> ·
     В Unsorted запланировано: <strong>{{ s.planned_unsorted }}</strong> ·
     В Unsorted перемещено: <strong>{{ s.unsorted }}</strong> ·
+    Результат MOVE не определён: <strong>{{ s.move_unknown }}</strong> ·
+    Требуют проверки: <strong>{{ s.pending_review }}</strong> ·
     Ошибок: <strong>{{ s.errors }}</strong>
   </div>
   <button class="btn btn-secondary btn-sm" onclick="runOne('{{ s.config_file }}')">
@@ -99,6 +101,8 @@ async function refresh() {
           'Запланировано: <strong>' + s.planned + '</strong> · ' +
           'В Unsorted запланировано: <strong>' + s.planned_unsorted + '</strong> · ' +
           'В Unsorted перемещено: <strong>' + s.unsorted + '</strong> · ' +
+          'Результат MOVE не определён: <strong>' + s.move_unknown + '</strong> · ' +
+          'Требуют проверки: <strong>' + s.pending_review + '</strong> · ' +
           'Ошибок: <strong>' + s.errors + '</strong>';
       }
       if (mode) {

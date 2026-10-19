@@ -11,8 +11,9 @@ from datetime import datetime
 from typing import Any
 
 from .config import MailboxConfig, build_system_prompt
-from .imap_client import ImapClient
+from .imap_client import ImapClient, MoveNotStartedError, MoveUncertainError
 from .llm_client import LlmClient
+from .move_journal import MoveJournal
 
 logger = logging.getLogger("mailsorter.sorter")
 
@@ -23,6 +24,8 @@ class RunStats:
     moved: int = 0
     unsorted: int = 0
     planned_unsorted: int = 0
+    move_unknown: int = 0
+    pending_review: int = 0
     errors: int = 0
     planned: int = 0
     mode: str = "dry_run"
@@ -82,7 +85,9 @@ class MailSorter:
         self.stats = RunStats(status="running", mode=mode, started_at=datetime.now())
         logger.info("[%s] Начало обработки, mode=%s", self.name, mode)
 
+        journal: MoveJournal | None = None
         try:
+            journal = MoveJournal(self.config) if mode == "active" else None
             prompt = build_system_prompt(self.config.rules.destinations)
             llm_cfg = self.config.llm.model_copy(update={"system_prompt": prompt})
             with ImapClient(self.config.imap) as imap, LlmClient(llm_cfg) as llm:
@@ -97,6 +102,14 @@ class MailSorter:
                 for msg in messages:
                     self.stats.processed += 1
                     detail: dict[str, Any] = {"uid": str(msg.uid)}
+                    move_key = None
+                    if journal is not None:
+                        move_key = journal.key(source, imap.selected_uidvalidity, str(msg.uid))
+                        if move_key in journal.pending:
+                            self.stats.move_unknown += 1
+                            detail.update(action="move_pending_review", stage="journal_pending")
+                            self.stats.details.append(detail)
+                            continue
                     try:
                         subject = msg.subject or "(без темы)"
                         sender = msg.from_ or "(unknown)"
@@ -135,25 +148,58 @@ class MailSorter:
                                 self.stats.planned_unsorted += 1
                             detail["action"] = "planned"
                         else:
-                            imap.move_message(msg, destination)
+                            move_result = imap.move_message(
+                                msg, destination,
+                                before_command=lambda key=move_key: journal.begin(
+                                    key, source=source, uidvalidity=imap.selected_uidvalidity,
+                                    uid=str(msg.uid), target=destination,
+                                ),
+                            )
+                            try:
+                                journal.resolve(move_key)
+                            except Exception as exc:
+                                detail["journal_warning"] = type(exc).__name__
+                                logger.error("[%s] stage=journal_resolve uid=%s target=%s error_type=%s",
+                                             self.name, msg.uid, destination, type(exc).__name__)
+                            detail["move_evidence"] = move_result.evidence
+                            if move_result.error_type:
+                                detail["stage"] = "verify_move"
+                                detail["move_warning"] = move_result.error_type
                             if destination == unsorted:
                                 self.stats.unsorted += 1
                                 detail["action"] = "unsorted"
                             else:
                                 self.stats.moved += 1
                                 detail["action"] = "moved"
+                    except MoveUncertainError as exc:
+                        self.stats.errors += 1
+                        self.stats.move_unknown += 1
+                        detail.update(action="move_unknown", stage=exc.stage,
+                                      reason=exc.error_type)
+                        logger.error("[%s] stage=%s uid=%s target=%s error_type=%s outcome=unknown",
+                                     self.name, exc.stage, msg.uid, detail.get("folder"), exc.error_type)
+                    except MoveNotStartedError as exc:
+                        self.stats.errors += 1
+                        detail.update(action="move_not_started", stage=exc.stage,
+                                      reason=exc.error_type)
+                        logger.warning("[%s] stage=%s uid=%s target=%s error_type=%s outcome=not_started",
+                                       self.name, exc.stage, msg.uid, detail.get("folder"), exc.error_type)
                     except Exception as e:
                         self.stats.errors += 1
                         detail.update(action="error", reason=type(e).__name__)
-                        logger.warning("[%s] uid=%s processing error=%s", self.name, msg.uid, type(e).__name__)
+                        logger.warning("[%s] stage=processing uid=%s target=%s error_type=%s",
+                                       self.name, msg.uid, detail.get("folder"), type(e).__name__)
                     self.stats.details.append(detail)
 
+            if journal is not None:
+                self.stats.pending_review = len(journal.pending)
             self.stats.status = "done"
             self.stats.finished_at = datetime.now()
             logger.info(
-                "[%s] Готово: processed=%d planned=%d planned_unsorted=%d moved=%d unsorted=%d errors=%d",
+                "[%s] Готово: processed=%d planned=%d planned_unsorted=%d moved=%d unsorted=%d move_unknown=%d pending_review=%d errors=%d",
                 self.name, self.stats.processed, self.stats.planned,
-                self.stats.planned_unsorted, self.stats.moved, self.stats.unsorted, self.stats.errors,
+                self.stats.planned_unsorted, self.stats.moved, self.stats.unsorted,
+                self.stats.move_unknown, self.stats.pending_review, self.stats.errors,
             )
         except Exception as e:
             self.stats.status = "error"
@@ -161,6 +207,8 @@ class MailSorter:
             self.stats.finished_at = datetime.now()
             logger.error("[%s] Критическая ошибка: %s", self.name, type(e).__name__)
         finally:
+            if journal is not None:
+                self.stats.pending_review = len(journal.pending)
             self._running = False
             self._run_lock.release()
 

@@ -16,7 +16,7 @@ from mailsorter.config import LlmConfig, MailboxConfig
 from mailsorter.llm_client import LlmClient, LlmError
 from mailsorter.sorter import MailSorter
 from mailsorter.webapp import app
-from tests.test_safety import FakeImap
+from tests.test_safety import FakeImap, FakeMoveJournal
 
 KEY_NAME = "CLOUDRU_FOUNDATION_MODELS_API_KEY"
 
@@ -217,7 +217,8 @@ class CloudRuTests(unittest.TestCase):
         client = httpx.Client(transport=httpx.MockTransport(lambda req: httpx.Response(401)))
         with patch.dict(os.environ, {KEY_NAME: "offline-test-key"}), \
              patch("mailsorter.llm_client.httpx.Client", return_value=client), \
-             patch("mailsorter.sorter.ImapClient", FakeImap):
+             patch("mailsorter.sorter.ImapClient", FakeImap), \
+             patch("mailsorter.sorter.MoveJournal", FakeMoveJournal):
             stats = MailSorter(cfg).run_once(mode="active")
         self.assertEqual(FakeImap.instances[-1].moves, [])
         self.assertEqual(stats.errors, 1)

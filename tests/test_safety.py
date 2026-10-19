@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from mailsorter.config import ImapConfig, MailboxConfig, config_path
 from mailsorter.imap_client import ImapClient
+from mailsorter.imap_client import MoveResult
 from mailsorter.sorter import MailSorter
 from mailsorter.manager import SorterManager
 from mailsorter.security import REDACTED, redact_secrets, restore_redacted, sanitize_log
@@ -36,6 +37,7 @@ class FakeImap:
         self.fetches = []
         self.message = SimpleNamespace(uid="101", subject="Тема", from_="sender@example.invalid")
         self.instances.append(self)
+        self.selected_uidvalidity = 1
 
     def __enter__(self):
         return self
@@ -50,8 +52,11 @@ class FakeImap:
     def get_message_text(self, msg):
         return "Текст письма"
 
-    def move_message(self, msg, target):
+    def move_message(self, msg, target, before_command=None):
+        if before_command:
+            before_command()
         self.moves.append((msg.uid, target))
+        return MoveResult("server_ok")
 
     def ensure_folder(self, folder):
         self.creates.append(folder)
@@ -76,6 +81,21 @@ class FakeLlm:
         return self.answer
 
 
+class FakeMoveJournal:
+    def __init__(self, cfg):
+        self.pending = set()
+
+    @staticmethod
+    def key(source, uidvalidity, uid):
+        return (source, uid)
+
+    def begin(self, key, **_kwargs):
+        self.pending.add(key)
+
+    def resolve(self, key):
+        self.pending.discard(key)
+
+
 class SorterTests(unittest.TestCase):
     def setUp(self):
         FakeImap.instances.clear()
@@ -83,10 +103,13 @@ class SorterTests(unittest.TestCase):
         FakeLlm.error = None
         self.imap_patch = patch("mailsorter.sorter.ImapClient", FakeImap)
         self.llm_patch = patch("mailsorter.sorter.LlmClient", FakeLlm)
+        self.journal_patch = patch("mailsorter.sorter.MoveJournal", FakeMoveJournal)
         self.imap_patch.start()
         self.llm_patch.start()
+        self.journal_patch.start()
         self.addCleanup(self.imap_patch.stop)
         self.addCleanup(self.llm_patch.stop)
+        self.addCleanup(self.journal_patch.stop)
 
     def test_dry_run_reads_and_plans_without_mutation(self):
         stats = MailSorter(mailbox_config()).run_once()
@@ -96,6 +119,11 @@ class SorterTests(unittest.TestCase):
         self.assertEqual(fake.creates, [])
         self.assertEqual((stats.mode, stats.planned, stats.moved), ("dry_run", 1, 0))
         self.assertEqual(stats.details[0]["folder"], "INBOX/Work")
+
+    def test_dry_run_does_not_open_move_journal(self):
+        with patch("mailsorter.sorter.MoveJournal", side_effect=AssertionError("journal opened")):
+            stats = MailSorter(mailbox_config()).run_once()
+        self.assertEqual((stats.status, stats.planned, stats.moved), ("done", 1, 0))
 
     def test_active_moves_only_known_category_with_sufficient_confidence(self):
         stats = MailSorter(mailbox_config()).run_once(mode="active")

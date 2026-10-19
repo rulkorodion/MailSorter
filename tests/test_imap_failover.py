@@ -35,6 +35,20 @@ def fake_mailbox(login_error=None):
 
 
 class ImapFailoverTests(unittest.TestCase):
+    def test_connect_remembers_selected_inbox_uidvalidity(self):
+        tls_socket = MagicMock()
+        mailbox = fake_mailbox()
+        mailbox.client.untagged_responses = {"UIDVALIDITY": [b"23"]}
+        with patch("mailsorter.imap_client.socket.getaddrinfo", return_value=ADDRESSES[:1]), \
+             patch("mailsorter.imap_client._open_tls_socket", return_value=tls_socket), \
+             patch("mailsorter.imap_client._PreconnectedMailBox", return_value=mailbox):
+            client = ImapClient(config())
+            client.connect()
+            self.assertEqual(client._selected_folder, "INBOX")
+            self.assertEqual(client.selected_uidvalidity, 23)
+            client.disconnect()
+        self.assertIsNone(client.selected_uidvalidity)
+
     def test_first_ip_handshake_fails_second_succeeds(self):
         tls_socket = MagicMock()
         mailbox = fake_mailbox()

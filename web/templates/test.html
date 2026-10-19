@@ -16,6 +16,7 @@
     {% for f in files %}<option value="{{ f }}">{{ f }}</option>{% endfor %}
   </select>
 </div>
+<div id="model-info" class="hint"></div>
 
 <div class="card">
   <h2>Письмо из ящика</h2>
@@ -40,7 +41,15 @@
 <script>
 function onCfgChange() {
   document.getElementById('msg-list').innerHTML = 'Нажмите «Загрузить письма»';
+  loadModelInfo();
 }
+async function loadModelInfo() {
+  const f = document.getElementById('cfg-file').value;
+  const r = await fetch('/api/llm-settings/' + encodeURIComponent(f));
+  const d = await r.json();
+  document.getElementById('model-info').textContent = d.ok ? ('Модель: ' + d.provider + ' / ' + d.model) : '';
+}
+if (document.getElementById('cfg-file')) loadModelInfo();
 
 async function loadMessages() {
   const box = document.getElementById('msg-list');
@@ -87,7 +96,11 @@ async function classify() {
     const d = await r.json();
     if (d.ok) {
       box.innerHTML = '<div class="alert alert-success"><strong>Папка:</strong> '+esc(d.result.category)+
-        '<br><strong>Уверенность:</strong> '+(d.result.confidence*100).toFixed(1)+'%</div>';
+        '<br><strong>Уверенность:</strong> '+(d.result.confidence*100).toFixed(1)+'%'+
+        '<br><strong>Причина:</strong> '+esc(d.result.reason||'—')+
+        '<br><strong>Длительность:</strong> '+esc(String(d.result.latency_ms??'—'))+' мс'+
+        '<br><strong>Токены:</strong> '+esc(String(d.result.usage?.total_tokens??'—'))+
+        '</div>';
     } else {
       box.innerHTML = '<div class="alert alert-error">'+(d.error||'Ошибка')+'</div>';
     }

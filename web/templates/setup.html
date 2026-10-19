@@ -73,10 +73,12 @@
     </div>
 
     <div class="card step-panel" id="step-2">
-      <h2>Локальный ИИ (Ollama)</h2>
-      <div class="form-row"><label>Адрес Ollama</label><input type="text" id="llm_endpoint" value="http://localhost:11434"></div>
+      <h2>Модель ИИ</h2>
+      <div class="form-row"><label>Провайдер</label><select id="llm_provider" onchange="onProviderChange()"><option value="ollama">Ollama (локально)</option><option value="cloudru">Cloud.ru Foundation Models</option></select></div>
+      <div class="form-row" id="ollama-endpoint-row"><label>Адрес Ollama</label><input type="text" id="llm_endpoint" value="http://localhost:11434"></div>
       <div class="form-row"><label>Модель</label><input type="text" id="llm_model" value="qwen2.5:14b"></div>
-      <div class="form-row"><label>Температура</label><input type="text" id="llm_temp" value="0.1"></div>
+      <div class="form-row"><label>Температура (необязательно для Cloud.ru)</label><input type="text" id="llm_temp" value="0.1"></div>
+      <div class="hint" id="cloudru-hint" style="display:none">Ключ читается только из переменной среды CLOUDRU_FOUNDATION_MODELS_API_KEY на компьютере, где запущен сервер. В YAML сохраняется только ENV-ссылка. Проверка модели доступна после сохранения.</div>
       <div class="form-row"><label>Порог уверенности</label><input type="text" id="confidence" value="0.75"></div>
       <div class="nav-btns">
         <button class="btn btn-secondary" onclick="goStep(1)">← Назад</button>
@@ -125,6 +127,13 @@ let destinations = [
 
 function showMsg(t, ok) {
   document.getElementById('msg').innerHTML = '<div class="alert alert-'+(ok?'success':'error')+'">'+t+'</div>';
+}
+function onProviderChange() {
+  const cloud = document.getElementById('llm_provider').value === 'cloudru';
+  document.getElementById('ollama-endpoint-row').style.display = cloud ? 'none' : '';
+  document.getElementById('cloudru-hint').style.display = cloud ? '' : 'none';
+  document.getElementById('llm_model').value = cloud ? 'openai/gpt-oss-120b' : 'qwen2.5:14b';
+  document.getElementById('llm_temp').value = cloud ? '' : '0.1';
 }
 function goStep(n) {
   if (n===2 && !document.getElementById('imap_user').value.trim()) { showMsg('Укажите email', false); return; }
@@ -238,9 +247,10 @@ async function saveSetup() {
       poll_interval_seconds: parseInt(document.getElementById('poll_interval').value,10)||60
     },
     llm: {
+      provider: document.getElementById('llm_provider').value,
       endpoint: document.getElementById('llm_endpoint').value.trim(),
       model: document.getElementById('llm_model').value.trim(),
-      temperature: parseFloat(document.getElementById('llm_temp').value)||0.1
+      temperature: document.getElementById('llm_temp').value.trim()
     },
     confidence_threshold: parseFloat(document.getElementById('confidence').value)||0.75,
     destinations: dest,

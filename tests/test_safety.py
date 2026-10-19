@@ -64,6 +64,12 @@ class FakeLlm:
     def __init__(self, cfg):
         pass
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
+
     def classify(self, *args):
         if self.error:
             raise self.error

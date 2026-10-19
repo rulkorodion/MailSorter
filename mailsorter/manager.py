@@ -158,6 +158,8 @@ class SorterManager:
             out.append({
                 "config_file": fname,
                 "name": sorter.name,
+                "provider": sorter.config.llm.provider,
+                "model": sorter.config.llm.model,
                 "status": stats.status,
                 "processed": stats.processed,
                 "moved": stats.moved,

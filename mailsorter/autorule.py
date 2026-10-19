@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from .config import LlmConfig, MailboxConfig, load_mailbox_config, config_path
+from .config import MailboxConfig, load_mailbox_config, config_path
 from .imap_client import ImapClient
 from .llm_client import LlmClient
 
@@ -108,18 +108,17 @@ class AutoRuleManager:
         job = self._jobs[job_id]
         job.status = "running"
         job.phase = "summary"
+        llm = None
+        synth_llm = None
         try:
             cfg = load_mailbox_config(config_path(job.config_file))
             llm = LlmClient(
-                LlmConfig(
-                    endpoint=cfg.llm.endpoint,
-                    model=cfg.llm.model,
-                    temperature=0.2,
-                    max_tokens=200,
-                    timeout_seconds=cfg.llm.timeout_seconds,
-                    max_retries=1,
-                    system_prompt=SUMMARY_SYSTEM,
-                )
+                cfg.llm.model_copy(update={
+                    "temperature": None if cfg.llm.provider == "cloudru" else 0.2,
+                    "max_tokens": 2048 if cfg.llm.provider == "cloudru" else 200,
+                    "max_retries": 1,
+                    "system_prompt": SUMMARY_SYSTEM,
+                })
             )
 
             with ImapClient(cfg.imap) as imap:
@@ -152,7 +151,11 @@ class AutoRuleManager:
                         f"Текст:\n{body}"
                     )
                     try:
-                        summary = llm.chat(SUMMARY_SYSTEM, user, temperature=0.2, max_tokens=150)
+                        summary = llm.chat(
+                            SUMMARY_SYSTEM, user,
+                            temperature=None if cfg.llm.provider == "cloudru" else 0.2,
+                            max_tokens=None if cfg.llm.provider == "cloudru" else 150,
+                        )
                     except Exception as e:
                         logger.warning("Саммари uid=%s: %s", msg.uid, type(e).__name__)
                         summary = "(не удалось получить саммари)"
@@ -183,17 +186,18 @@ class AutoRuleManager:
                 f"Саммари писем:\n" + "\n".join(lines)
             )
             synth_llm = LlmClient(
-                LlmConfig(
-                    endpoint=cfg.llm.endpoint,
-                    model=cfg.llm.model,
-                    temperature=0.3,
-                    max_tokens=300,
-                    timeout_seconds=cfg.llm.timeout_seconds,
-                    max_retries=1,
-                    system_prompt=SYNTH_SYSTEM,
-                )
+                cfg.llm.model_copy(update={
+                    "temperature": None if cfg.llm.provider == "cloudru" else 0.3,
+                    "max_tokens": 2048 if cfg.llm.provider == "cloudru" else 300,
+                    "max_retries": 1,
+                    "system_prompt": SYNTH_SYSTEM,
+                })
             )
-            draft = synth_llm.chat(SYNTH_SYSTEM, user_synth, temperature=0.3, max_tokens=300)
+            draft = synth_llm.chat(
+                SYNTH_SYSTEM, user_synth,
+                temperature=None if cfg.llm.provider == "cloudru" else 0.3,
+                max_tokens=None if cfg.llm.provider == "cloudru" else 300,
+            )
             # убрать обёртки в кавычки если модель добавила
             draft = draft.strip().strip('"').strip("«»").strip()
             job.draft_condition = draft
@@ -205,6 +209,11 @@ class AutoRuleManager:
             job.status = "error"
             job.error = type(e).__name__
             job.finished_at = datetime.now()
+        finally:
+            if llm is not None:
+                llm.close()
+            if synth_llm is not None:
+                synth_llm.close()
 
 
 autorule_manager = AutoRuleManager()

@@ -15,6 +15,7 @@
     <div class="name">{{ s.name }}</div>
     <div class="alert {{ 'alert-error' if s.mode == 'active' else 'alert-info' }}">{{ 'ACTIVE — письма перемещаются' if s.mode == 'active' else 'DRY RUN — без изменений почты' }}</div>
     <div class="meta">файл: {{ s.config_file }}</div>
+    <div class="meta">Модель: {{ 'Cloud.ru' if s.provider == 'cloudru' else 'Ollama' }} / {{ s.model }}</div>
     <div style="margin: 0.5rem 0">
       <span class="badge badge-{{ s.status }}">{{ s.status }}</span>
     </div>

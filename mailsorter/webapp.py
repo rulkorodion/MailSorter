@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 
 from .config import (
     CONFIGS_DIR,
@@ -30,7 +31,7 @@ from .config import (
 )
 from .exchange import PRESETS, autodiscover_microsoft
 from .imap_client import ImapClient
-from .llm_client import LlmClient
+from .llm_client import LlmClient, LlmError
 from .manager import manager
 from .sorter import MailSorter
 from .autorule import autorule_manager, MIN_EMAILS
@@ -159,6 +160,7 @@ def _build_config_yaml(data: dict[str, Any]) -> str:
     prompt = build_system_prompt(destinations)
     imap = data["imap"]
     llm = data.get("llm") or {}
+    provider = llm.get("provider") or "ollama"
     web = data.get("web") or {}
     threshold = float(data.get("confidence_threshold", 0.75))
 
@@ -175,10 +177,13 @@ def _build_config_yaml(data: dict[str, Any]) -> str:
             "ssl_verify": True,
         },
         "llm": {
+            "provider": provider,
             "endpoint": llm.get("endpoint") or "http://localhost:11434",
-            "model": llm.get("model") or "qwen2.5:14b",
-            "temperature": float(llm.get("temperature", 0.1)),
-            "max_tokens": 300,
+            "base_url": "https://foundation-models.api.cloud.ru/v1",
+            "model": llm.get("model") or ("openai/gpt-oss-120b" if provider == "cloudru" else "qwen2.5:14b"),
+            "temperature": (float(llm["temperature"]) if llm.get("temperature") not in (None, "") else
+                            (None if provider == "cloudru" else 0.1)),
+            "max_tokens": 2048 if provider == "cloudru" else 300,
             "timeout_seconds": 120,
             "max_retries": 3,
             "system_prompt": prompt,
@@ -201,6 +206,8 @@ def _build_config_yaml(data: dict[str, Any]) -> str:
             "backup_count": 3,
         },
     }
+    if provider == "cloudru":
+        doc["llm"]["api_key"] = "ENV:CLOUDRU_FOUNDATION_MODELS_API_KEY"
     return yaml.dump(doc, allow_unicode=True, default_flow_style=False, sort_keys=False)
 
 
@@ -642,26 +649,78 @@ async def api_test(request: Request, user: str = Depends(verify_auth)):
         return JSONResponse({"ok": False, "error": _public_error(e)}, status_code=400)
 
     prompt = body.get("system_prompt") or build_system_prompt(cfg.rules.destinations)
-    from .config import LlmConfig
-
-    llm_cfg = LlmConfig(
-        endpoint=cfg.llm.endpoint,
-        model=cfg.llm.model,
-        temperature=cfg.llm.temperature,
-        max_tokens=cfg.llm.max_tokens,
-        timeout_seconds=cfg.llm.timeout_seconds,
-        max_retries=cfg.llm.max_retries,
-        system_prompt=prompt,
-    )
+    llm_cfg = cfg.llm.model_copy(update={"system_prompt": prompt})
     try:
-        result = LlmClient(llm_cfg).classify(
-            body.get("subject", ""),
-            body.get("sender", "test@example.com"),
-            body.get("text", ""),
-        )
-        return {"ok": True, "result": result}
+        with LlmClient(llm_cfg) as llm:
+            result = await run_in_threadpool(
+                llm.classify,
+                body.get("subject", ""),
+                body.get("sender", "test@example.com"),
+                body.get("text", ""),
+            )
+        return {"ok": True, "provider": cfg.llm.provider, "model": cfg.llm.model, "result": result}
     except Exception as e:
-        return JSONResponse({"ok": False, "error": _public_error(e)}, status_code=500)
+        return JSONResponse({"ok": False, "error": str(e) if isinstance(e, LlmError) else _public_error(e)},
+                            status_code=502)
+
+
+@app.post("/api/test-model/{filename}")
+async def api_test_model(filename: str, user: str = Depends(verify_auth)):
+    """Synthetic model-only probe: never reads IMAP or a real message."""
+    try:
+        cfg = load_mailbox_config(config_path(filename))
+        with LlmClient(cfg.llm) as llm:
+            answer = await run_in_threadpool(llm.chat, "Ответь одним словом OK.", "Проверка соединения.")
+            metrics = llm.last_response
+        if not answer:
+            raise LlmError("Модель вернула пустой ответ")
+        return {"ok": True, "provider": cfg.llm.provider, "model": cfg.llm.model,
+                "latency_ms": metrics.latency_ms if metrics else None,
+                "usage": metrics.usage if metrics else None}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e) if isinstance(e, LlmError) else _public_error(e)},
+                            status_code=502)
+
+
+@app.get("/api/llm-settings/{filename}")
+async def api_llm_settings(filename: str, user: str = Depends(verify_auth)):
+    try:
+        cfg = load_mailbox_config(config_path(filename))
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": _public_error(e)}, status_code=400)
+    return {"ok": True, "provider": cfg.llm.provider, "model": cfg.llm.model,
+            "temperature": cfg.llm.temperature, "max_tokens": cfg.llm.max_tokens}
+
+
+@app.post("/api/llm-settings/{filename}")
+async def api_save_llm_settings(filename: str, request: Request, user: str = Depends(verify_auth)):
+    try:
+        raw = load_raw_yaml(filename)
+        body = await request.json()
+        provider, model = body.get("provider"), body.get("model")
+        if provider not in ("ollama", "cloudru") or not isinstance(model, str) or not model.strip():
+            raise ValueError("Укажите провайдера и модель")
+        llm = raw.setdefault("llm", {})
+        llm["provider"] = provider
+        llm["model"] = model.strip()
+        if provider == "cloudru":
+            llm["base_url"] = "https://foundation-models.api.cloud.ru/v1"
+            llm["api_key"] = "ENV:CLOUDRU_FOUNDATION_MODELS_API_KEY"
+            llm["max_tokens"] = max(2048, int(llm.get("max_tokens") or 0))
+            llm["temperature"] = None
+        else:
+            llm.pop("api_key", None)
+            llm.pop("base_url", None)
+            if llm.get("temperature") is None:
+                llm["temperature"] = 0.1
+        ok, message, _ = validate_yaml_text(yaml.safe_dump(raw, allow_unicode=True))
+        if not ok:
+            raise ValueError(message)
+        write_raw_yaml(filename, raw)
+        manager.reload_one(filename)
+        return {"ok": True, "provider": provider, "model": model.strip()}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": _public_error(e)}, status_code=400)
 
 
 

@@ -6,6 +6,18 @@
 <h1>Конфигурация</h1>
 <p class="subtitle">Редактирование YAML-файлов ящиков. Изменения применяются без перезапуска.</p>
 
+<div class="card">
+  <h2>Провайдер модели</h2>
+  <div class="form-row"><label>Провайдер</label><select id="llm-provider"><option value="ollama">Ollama (локально)</option><option value="cloudru">Cloud.ru Foundation Models</option></select></div>
+  <div class="form-row"><label>Модель</label><input id="llm-model" type="text" placeholder="openai/gpt-oss-120b"></div>
+  <div class="toolbar">
+    <button class="btn btn-primary" onclick="saveLlmSettings()">Сохранить модель</button>
+    <button class="btn btn-secondary" onclick="testModel()">Проверить модель (искусственный текст)</button>
+  </div>
+  <div id="llm-result" class="hint"></div>
+  <div class="hint">Cloud.ru: ключ берётся только из переменной среды CLOUDRU_FOUNDATION_MODELS_API_KEY. Переключение провайдера возвращает ящик в Dry Run.</div>
+</div>
+
 <div class="help-block">
   <strong>Как это работает:</strong> каждый файл в папке <code>configs/</code> — отдельный почтовый ящик.
   После сохранения конфиг автоматически перечитывается. Обязательные секции: <code>name</code>, <code>imap</code>, <code>llm</code>, <code>rules</code>.
@@ -34,11 +46,16 @@
     <code>imap.host / port</code> — адрес и порт IMAP-сервера (обычно 993)<br>
     <code>imap.username / password</code> — логин и пароль (или ENV:VAR)<br>
     <code>imap.inbox_folder</code> — папка входящих (обычно INBOX)<br>
-    <code>imap.unsorted_folder</code> — куда складывать письма с низкой уверенностью / ошибками<br>
+    <code>imap.unsorted_folder</code> — куда складывать письма с низкой уверенностью<br>
     <code>imap.poll_interval_seconds</code> — как часто опрашивать ящик (мин. 10)<br>
+    <code>llm.provider</code> — ollama или cloudru<br>
     <code>llm.endpoint</code> — адрес Ollama (по умолчанию http://localhost:11434)<br>
+    <code>llm.base_url</code> — Cloud.ru API (фиксированный HTTPS-адрес)<br>
+    <code>llm.api_key</code> — только ENV:CLOUDRU_FOUNDATION_MODELS_API_KEY<br>
     <code>llm.model</code> — имя модели<br>
-    <code>llm.system_prompt</code> — системный промпт; плейсхолдер {categories} подставится автоматически<br>
+    <code>llm.max_tokens</code> — для Cloud.ru включает reasoning-токены; рекомендуется не менее 2048<br>
+    <code>llm.temperature</code> — необязательно для Cloud.ru; зависит от модели<br>
+    <code>llm.system_prompt</code> — формируется из правил автоматически<br>
     <code>rules.confidence_threshold</code> — порог уверенности (0–1)<br>
     <code>rules.categories</code> — список {name, folder}<br>
     <code>web.admin_username / admin_password</code> — логин/пароль веб-интерфейса<br>
@@ -60,8 +77,47 @@ async function loadFile() {
   const r = await fetch('/api/config/' + encodeURIComponent(f));
   const d = await r.json();
   document.getElementById('editor').value = d.content || '';
+  await loadLlmSettings();
   history.replaceState(null, '', '/config?file=' + encodeURIComponent(f));
 }
+
+async function loadLlmSettings() {
+  const f = document.getElementById('file-select').value;
+  if (!f) return;
+  const r = await fetch('/api/llm-settings/' + encodeURIComponent(f));
+  const d = await r.json();
+  if (d.ok) {
+    document.getElementById('llm-provider').value = d.provider;
+    document.getElementById('llm-model').value = d.model;
+  }
+}
+
+async function saveLlmSettings() {
+  const f = document.getElementById('file-select').value;
+  if (!f) return;
+  const r = await fetch('/api/llm-settings/' + encodeURIComponent(f), {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({provider:document.getElementById('llm-provider').value,
+                         model:document.getElementById('llm-model').value.trim()})
+  });
+  const d = await r.json();
+  document.getElementById('llm-result').textContent = d.ok ? 'Сохранено. Режим: Dry Run.' : (d.error || 'Ошибка');
+  if (d.ok) await loadFile();
+}
+
+async function testModel() {
+  const f = document.getElementById('file-select').value;
+  if (!f) return;
+  const box = document.getElementById('llm-result');
+  box.textContent = 'Проверка модели...';
+  const r = await fetch('/api/test-model/' + encodeURIComponent(f), {method:'POST'});
+  const d = await r.json();
+  box.textContent = d.ok
+    ? 'Модель доступна: ' + d.provider + ' / ' + d.model + ' · ' + d.latency_ms + ' мс'
+    : (d.error || 'Ошибка модели');
+}
+
+loadLlmSettings();
 
 async function saveConfig() {
   const f = document.getElementById('file-select').value;

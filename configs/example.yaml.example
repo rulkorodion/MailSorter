@@ -15,12 +15,24 @@ imap:
   ssl_verify: true
 
 llm:
+  provider: ollama  # старые конфиги без provider также используют Ollama
   endpoint: "http://localhost:11434"
   model: "qwen2.5:14b"
   temperature: 0.1
   max_tokens: 300
   timeout_seconds: 120
   max_retries: 3
+
+# Для Cloud.ru замените секцию llm выше на:
+# llm:
+#   provider: cloudru
+#   model: "openai/gpt-oss-120b"
+#   base_url: "https://foundation-models.api.cloud.ru/v1"
+#   api_key: "ENV:CLOUDRU_FOUNDATION_MODELS_API_KEY"
+#   max_tokens: 2048  # включает reasoning-токены
+#   timeout_seconds: 120
+#   max_retries: 3
+#   # temperature: 0.5  # только после проверки поддержки выбранной моделью
 
 # Режим Dry Run включён при каждом запуске. Active включается только через веб-интерфейс.
 rules:

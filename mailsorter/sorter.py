@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from .config import LlmConfig, MailboxConfig, build_system_prompt
+from .config import MailboxConfig, build_system_prompt
 from .imap_client import ImapClient
 from .llm_client import LlmClient
 
@@ -55,27 +55,17 @@ class MailSorter:
         logger.info("[%s] Начало обработки, mode=%s", self.name, mode)
 
         try:
-            with ImapClient(self.config.imap) as imap:
+            prompt = build_system_prompt(self.config.rules.destinations)
+            llm_cfg = self.config.llm.model_copy(update={"system_prompt": prompt})
+            with ImapClient(self.config.imap) as imap, LlmClient(llm_cfg) as llm:
                 source = self.config.rules.source_folder
                 messages = imap.fetch_folder_messages(source, limit=100)
                 logger.info("[%s] Писем в %s: %d", self.name, source, len(messages))
 
-                prompt = build_system_prompt(self.config.rules.destinations)
-                llm_cfg = LlmConfig(
-                    endpoint=self.config.llm.endpoint,
-                    model=self.config.llm.model,
-                    temperature=self.config.llm.temperature,
-                    max_tokens=self.config.llm.max_tokens,
-                    timeout_seconds=self.config.llm.timeout_seconds,
-                    max_retries=self.config.llm.max_retries,
-                    system_prompt=prompt,
-                )
-                llm = LlmClient(llm_cfg)
-
                 folder_set = {d.folder for d in self.config.rules.destinations}
                 folder_lower = {d.folder.lower(): d.folder for d in self.config.rules.destinations}
                 threshold = self.config.rules.confidence_threshold
-                max_retries = self.config.llm.max_retries
+                max_retries = 1 if llm_cfg.provider == "cloudru" else llm_cfg.max_retries
                 unsorted = self.config.imap.unsorted_folder
 
                 for msg in messages:
@@ -112,6 +102,12 @@ class MailSorter:
                             raise ValueError("Неизвестная категория модели")
                         destination = target if target and confidence >= threshold else unsorted
                         detail.update(category=category, confidence=confidence, folder=destination)
+                        if result.get("reason"):
+                            detail["reason"] = result["reason"][:500]
+                        if "latency_ms" in result:
+                            detail["latency_ms"] = result["latency_ms"]
+                        if "usage" in result:
+                            detail["usage"] = result["usage"]
                         if confidence < threshold:
                             detail["reason"] = "low_confidence"
                         if mode == "dry_run":

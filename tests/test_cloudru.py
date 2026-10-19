@@ -154,10 +154,9 @@ class CloudRuTests(unittest.TestCase):
                 self.request_with(handler)
         self.assertEqual(len(calls), 2)
 
-    def test_invalid_json_empty_unknown_and_truncated_are_rejected(self):
+    def test_invalid_json_unknown_and_truncated_are_rejected(self):
         cases = [
             answer(content="not json"),
-            answer(category=""),
             answer(category="INBOX/Other"),
             answer(finish_reason="length"),
             {"choices": []},
@@ -166,6 +165,24 @@ class CloudRuTests(unittest.TestCase):
             with self.subTest(response=response):
                 with self.assertRaises(LlmError):
                     self.request_with(lambda req: httpx.Response(200, json=response))
+
+    def test_explained_empty_category_is_valid_abstention(self):
+        response = answer(content=json.dumps({"category": "", "confidence": 0.0,
+                                              "reason": "Недостаточно сведений"}))
+        result = self.request_with(lambda req: httpx.Response(200, json=response))
+        self.assertEqual(result["category"], "")
+        self.assertTrue(result["abstained"])
+
+    def test_ollama_truncated_completion_is_rejected(self):
+        payload = {"message": {"content": json.dumps({"category": "INBOX/Work",
+                                                         "confidence": 0.9})},
+                   "done_reason": "length"}
+        client = httpx.Client(transport=httpx.MockTransport(
+            lambda req: httpx.Response(200, json=payload)))
+        cfg = LlmConfig(allowed_categories=["INBOX/Work"])
+        with patch("mailsorter.llm_client.httpx.Client", return_value=client):
+            with LlmClient(cfg) as llm, self.assertRaises(LlmError):
+                llm.classify("Тема", "sender@example.invalid", "Текст")
 
     def test_old_configs_and_provider_selection(self):
         legacy = LlmConfig.model_validate({"endpoint": "http://localhost:11434"})

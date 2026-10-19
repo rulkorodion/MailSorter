@@ -66,6 +66,8 @@ class OllamaProvider:
             data = response.json()
             if not isinstance(data, dict):
                 raise ValueError("invalid response")
+            if data.get("done") is False or data.get("done_reason") == "length":
+                raise ValueError("completion truncated")
             message = data.get("message") or {}
             raw = message.get("content", "") if isinstance(message, dict) else ""
             raw = raw or data.get("response", "")
@@ -222,21 +224,27 @@ class LlmClient:
         category = obj.get("category")
         confidence = obj.get("confidence")
         reason = obj.get("reason", "")
-        if not isinstance(category, str) or not category.strip():
-            raise LlmError("Модель не выбрала категорию; письмо останется на месте")
+        if not isinstance(category, str):
+            raise LlmError("Модель вернула некорректную категорию")
         if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
             raise LlmError("Модель вернула некорректную уверенность")
         if not math.isfinite(confidence) or not 0 <= confidence <= 1:
             raise LlmError("Модель вернула некорректную уверенность")
         if not isinstance(reason, str):
             raise LlmError("Модель вернула некорректное обоснование")
+        abstained = category == ""
         category = category.strip()
-        if self.cfg.allowed_categories:
+        if not abstained and not category:
+            raise LlmError("Модель вернула некорректную категорию")
+        if abstained and not reason.strip():
+            raise LlmError("Модель вернула пустую категорию без обоснования")
+        if category and self.cfg.allowed_categories:
             allowed = {name.casefold(): name for name in self.cfg.allowed_categories}
             if category.casefold() not in allowed:
                 raise LlmError("Модель выбрала категорию вне разрешённых правил")
             category = allowed[category.casefold()]
-        return {"category": category, "confidence": float(confidence), "reason": reason[:500]}
+        return {"category": category, "confidence": float(confidence),
+                "reason": reason[:500], "abstained": abstained}
 
     def chat(self, system: str, user: str, temperature: float | None = None,
              max_tokens: int | None = None) -> str:

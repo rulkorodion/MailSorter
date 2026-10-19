@@ -32,6 +32,33 @@ class RunStats:
     details: list[dict[str, Any]] = field(default_factory=list)
 
 
+def resolve_destination(result: dict[str, Any], config: MailboxConfig) -> tuple[str, float, str]:
+    """Map a validated model decision to an allowed folder, including explicit abstention."""
+    category = result.get("category")
+    confidence = result.get("confidence")
+    if not isinstance(category, str):
+        raise ValueError("Некорректная категория модели")
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+        raise ValueError("Некорректная уверенность модели")
+    if not math.isfinite(confidence) or not 0 <= confidence <= 1:
+        raise ValueError("Некорректная уверенность модели")
+    abstained = category == ""
+    category = category.strip()
+    if abstained:
+        reason = result.get("reason")
+        if result.get("abstained") is False or not isinstance(reason, str) or not reason.strip():
+            raise ValueError("Неподтверждённый отказ от классификации")
+        return category, float(confidence), config.imap.unsorted_folder
+    if not category or result.get("abstained") is True:
+        raise ValueError("Некорректная категория модели")
+    allowed = {d.folder.casefold(): d.folder for d in config.rules.destinations}
+    target = allowed.get(category.casefold())
+    if not target:
+        raise ValueError("Неизвестная категория модели")
+    destination = target if confidence >= config.rules.confidence_threshold else config.imap.unsorted_folder
+    return target, float(confidence), destination
+
+
 class MailSorter:
     def __init__(self, config: MailboxConfig):
         self.config = config
@@ -62,8 +89,6 @@ class MailSorter:
                 messages = imap.fetch_folder_messages(source, limit=100)
                 logger.info("[%s] Писем в %s: %d", self.name, source, len(messages))
 
-                folder_set = {d.folder for d in self.config.rules.destinations}
-                folder_lower = {d.folder.lower(): d.folder for d in self.config.rules.destinations}
                 threshold = self.config.rules.confidence_threshold
                 max_retries = 1 if llm_cfg.provider == "cloudru" else llm_cfg.max_retries
                 unsorted = self.config.imap.unsorted_folder
@@ -91,24 +116,17 @@ class MailSorter:
                             self.stats.details.append(detail)
                             continue
 
-                        category = (result.get("category") or "").strip()
-                        if not category:
-                            raise ValueError("Пустая категория модели")
-                        confidence = float(result.get("confidence") or 0)
-                        if not math.isfinite(confidence) or not 0 <= confidence <= 1:
-                            raise ValueError("Некорректная уверенность модели")
-                        target = category if category in folder_set else folder_lower.get(category.lower())
-                        if not target:
-                            raise ValueError("Неизвестная категория модели")
-                        destination = target if target and confidence >= threshold else unsorted
+                        category, confidence, destination = resolve_destination(result, self.config)
                         detail.update(category=category, confidence=confidence, folder=destination)
+                        if category == "":
+                            detail["decision"] = "no_matching_category"
                         if result.get("reason"):
                             detail["reason"] = result["reason"][:500]
                         if "latency_ms" in result:
                             detail["latency_ms"] = result["latency_ms"]
                         if "usage" in result:
                             detail["usage"] = result["usage"]
-                        if confidence < threshold:
+                        if confidence < threshold and category != "":
                             detail["reason"] = "low_confidence"
                         if mode == "dry_run":
                             self.stats.planned += 1

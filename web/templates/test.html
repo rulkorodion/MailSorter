@@ -95,7 +95,7 @@ async function classify() {
     const r = await fetch('/api/test', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
     const d = await r.json();
     if (d.ok) {
-      box.innerHTML = '<div class="alert alert-success"><strong>Папка:</strong> '+esc(d.result.category)+
+      box.innerHTML = '<div class="alert alert-success"><strong>План → папка:</strong> '+esc(d.result.folder)+
         '<br><strong>Уверенность:</strong> '+(d.result.confidence*100).toFixed(1)+'%'+
         '<br><strong>Причина:</strong> '+esc(d.result.reason||'—')+
         '<br><strong>Длительность:</strong> '+esc(String(d.result.latency_ms??'—'))+' мс'+

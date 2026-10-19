@@ -33,7 +33,7 @@ from .exchange import PRESETS, autodiscover_microsoft
 from .imap_client import ImapClient
 from .llm_client import LlmClient, LlmError
 from .manager import manager
-from .sorter import MailSorter
+from .sorter import MailSorter, resolve_destination
 from .autorule import autorule_manager, MIN_EMAILS
 from .security import REDACTED, has_unresolved_secret, hash_password, redact_secrets, restore_redacted, sanitize_log, verify_password
 
@@ -658,6 +658,8 @@ async def api_test(request: Request, user: str = Depends(verify_auth)):
                 body.get("sender", "test@example.com"),
                 body.get("text", ""),
             )
+        _, _, result["folder"] = resolve_destination(result, cfg)
+        result["action"] = "planned"
         return {"ok": True, "provider": cfg.llm.provider, "model": cfg.llm.model, "result": result}
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e) if isinstance(e, LlmError) else _public_error(e)},

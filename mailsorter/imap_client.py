@@ -65,6 +65,13 @@ class MoveUncertainError(RuntimeError):
         super().__init__(f"Результат IMAP MOVE не определён: {stage} ({error_type})")
 
 
+class ImapAuthenticationError(RuntimeError):
+    def __init__(self, credential_source: str, error_type: str):
+        self.credential_source = credential_source
+        self.error_type = error_type
+        super().__init__(f"Ошибка IMAP-аутентификации ({error_type})")
+
+
 def _single_header(msg: MailMessage, name: str) -> str | None:
     values = msg.headers.get(name) or msg.headers.get(name.lower()) or ()
     return str(values[0]).strip() if len(values) == 1 and values[0] else None
@@ -157,6 +164,7 @@ class ImapClient:
         self.disconnect()
 
     def connect(self) -> None:
+        credential_source = "environment" if self.cfg.password.startswith("ENV:") else "inline_yaml"
         password = self.cfg.resolve_password()
         host = self.cfg.host.strip()
         port = int(self.cfg.port)
@@ -235,8 +243,9 @@ class ImapClient:
                     mailbox.client.shutdown()
                 except Exception:
                     tls_socket.close()
-                logger.warning("IMAP login failed: ip=%s reason=%s", ip, type(exc).__name__)
-                raise RuntimeError(f"Ошибка IMAP-аутентификации ({type(exc).__name__})") from None
+                logger.warning("IMAP login failed: ip=%s reason=%s credential_source=%s",
+                               ip, type(exc).__name__, credential_source)
+                raise ImapAuthenticationError(credential_source, type(exc).__name__) from None
 
             tls_socket.settimeout(timeout)
             self._mailbox = mailbox

@@ -10,8 +10,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from .config import MailboxConfig, build_system_prompt
-from .imap_client import ImapClient, MoveNotStartedError, MoveUncertainError, destination_path
+from .config import MailboxConfig, MissingImapPassword, build_system_prompt
+from .imap_client import ImapAuthenticationError, ImapClient, MoveNotStartedError, MoveUncertainError, destination_path
 from .llm_client import LlmClient
 from .move_journal import MoveJournal
 
@@ -229,6 +229,12 @@ class MailSorter:
                     "folders_count": len(folders),
                     "inbox": self.config.imap.inbox_folder,
                 }
+        except MissingImapPassword as e:
+            return {"ok": False, "message": str(e)}
+        except ImapAuthenticationError as e:
+            source = ("переменная окружения" if e.credential_source == "environment"
+                      else "значение imap.password из YAML; MAIL_PASSWORD не используется")
+            return {"ok": False, "message": f"IMAP отклонил вход; источник пароля: {source}"}
         except Exception as e:
             return {"ok": False, "message": type(e).__name__}
 
@@ -283,6 +289,16 @@ class MailSorter:
                     imap._resolve_folder_name(item["path"], final) for item in result["folders"]
                 )
                 result["ok"] = True
+        except MissingImapPassword as e:
+            result["ok"] = False
+            result["errors"].append(type(e).__name__)
+            result["error_message"] = str(e)
+        except ImapAuthenticationError as e:
+            result["ok"] = False
+            result["errors"].append(type(e).__name__)
+            source = ("переменная окружения" if e.credential_source == "environment"
+                      else "значение imap.password из YAML; MAIL_PASSWORD не используется")
+            result["error_message"] = f"IMAP отклонил вход; источник пароля: {source}"
         except Exception as e:
             result["ok"] = False
             result["errors"].append(type(e).__name__)

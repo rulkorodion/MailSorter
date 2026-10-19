@@ -14,6 +14,14 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 CONFIGS_DIR = Path(__file__).resolve().parent.parent / "configs"
 
 
+class MissingImapPassword(ValueError):
+    """The configured environment reference cannot be resolved in this process."""
+
+    def __init__(self, env_name: str):
+        self.env_name = env_name
+        super().__init__(f"Переменная окружения {env_name} не задана для процесса Mail Sorter")
+
+
 def config_path(filename: str) -> Path:
     """Resolve one mailbox YAML name without permitting directory traversal."""
     if not isinstance(filename, str) or not filename or filename in {".", ".."}:
@@ -46,7 +54,7 @@ class ImapConfig(BaseModel):
             env_name = self.password[4:].strip()
             value = os.environ.get(env_name)
             if not value:
-                raise ValueError(f"Переменная окружения {env_name} не задана")
+                raise MissingImapPassword(env_name)
             return value
         return self.password
 

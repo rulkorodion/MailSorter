@@ -200,7 +200,7 @@ async function checkFolders(create) {
        body:JSON.stringify({confirmation})});
     d = await r.json();
     if (!r.ok || !d.ok) { box.innerHTML = '<div class="alert alert-error">Проверка не выполнена: ' +
-      esc(d.detail || d.error || (d.errors||[]).map(imapError).join(', ') || 'Ошибка IMAP') + '</div>'; return; }
+      esc(d.detail || d.error_message || d.error || (d.errors||[]).map(imapError).join(', ') || 'Ошибка IMAP') + '</div>'; return; }
   } catch(e) { box.textContent = 'Ошибка подключения или ответа сервера'; return; }
   let html = '<div class="alert alert-'+(d.ready?'success':'info')+'">'+
     (d.ready?'Ящик готов к сортировке':'Структура не готова: есть отсутствующие папки или ошибки')+'</div>';

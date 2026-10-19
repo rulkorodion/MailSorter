@@ -22,6 +22,8 @@
   <strong>Как это работает:</strong> каждый файл в папке <code>configs/</code> — отдельный почтовый ящик.
   После сохранения конфиг автоматически перечитывается. Обязательные секции: <code>name</code>, <code>imap</code>, <code>llm</code>, <code>rules</code>.
   Секреты скрыты как <code>&lt;REDACTED&gt;</code> при просмотре. Не меняйте этот маркер, если хотите сохранить текущее значение. Для нового секрета используйте <code>ENV:ИМЯ_ПЕРЕМЕННОЙ</code>.
+  <br><strong>IMAP:</strong> <code>MAIL_PASSWORD</code> используется только при <code>imap.password: ENV:MAIL_PASSWORD</code>. Переменная должна существовать в окружении процесса до запуска Mail Sorter; редактор её не загружает и не подставляет автоматически.
+  <br><span id="imap-credential-source">Источник IMAP-пароля: {% if imap_credential_source == 'environment' %}переменная окружения{% elif imap_credential_source == 'inline_yaml' %}значение из YAML (MAIL_PASSWORD не используется){% else %}неизвестен{% endif %}</span>
 </div>
 
 <div class="card">
@@ -77,6 +79,8 @@ async function loadFile() {
   const r = await fetch('/api/config/' + encodeURIComponent(f));
   const d = await r.json();
   document.getElementById('editor').value = d.content || '';
+  document.getElementById('imap-credential-source').textContent = 'Источник IMAP-пароля: ' +
+    (d.imap_credential_source === 'environment' ? 'переменная окружения' : 'значение из YAML (MAIL_PASSWORD не используется)');
   await loadLlmSettings();
   history.replaceState(null, '', '/config?file=' + encodeURIComponent(f));
 }
@@ -137,7 +141,7 @@ async function validateConfig() {
   const r = await fetch('/api/validate', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({content})
+    body: JSON.stringify({content, file: document.getElementById('file-select').value})
   });
   const d = await r.json();
   showMsg(d.message, d.ok);

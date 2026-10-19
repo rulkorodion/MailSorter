@@ -20,6 +20,7 @@ from .config import (
     CONFIGS_DIR,
     config_path,
     ImapConfig,
+    MissingImapPassword,
     build_system_prompt,
     delete_config,
     destinations_to_dict,
@@ -30,7 +31,7 @@ from .config import (
     write_raw_yaml,
 )
 from .exchange import PRESETS, autodiscover_microsoft
-from .imap_client import ImapClient, destination_path
+from .imap_client import ImapAuthenticationError, ImapClient, destination_path
 from .llm_client import LlmClient, LlmError
 from .manager import manager
 from .sorter import MailSorter, resolve_destination
@@ -75,6 +76,12 @@ def _require_local_setup(request: Request) -> None:
 def _redacted_yaml(text: str) -> str:
     raw = yaml.safe_load(text)
     return yaml.safe_dump(redact_secrets(raw), allow_unicode=True, sort_keys=False)
+
+
+def _imap_credential_source(raw: Any) -> str:
+    imap = raw.get("imap", {}) if isinstance(raw, dict) else {}
+    password = imap.get("password") if isinstance(imap, dict) else None
+    return "environment" if isinstance(password, str) and password.startswith("ENV:") else "inline_yaml"
 
 
 def _restore_yaml(text: str, filename: str) -> str:
@@ -258,17 +265,20 @@ async def page_config(request: Request, file: str | None = None, user: str = Dep
     if is_setup_mode():
         return RedirectResponse(url="/setup", status_code=302)
     files = [p.name for p in list_config_files()]
-    content, current = "", file or (files[0] if files else "")
+    content, current, credential_source = "", file or (files[0] if files else ""), "unknown"
     if current:
         try:
             path = config_path(current)
             if path.exists():
-                content = _redacted_yaml(path.read_text(encoding="utf-8"))
+                source_text = path.read_text(encoding="utf-8")
+                credential_source = _imap_credential_source(yaml.safe_load(source_text))
+                content = _redacted_yaml(source_text)
         except ValueError:
             raise HTTPException(400, "Недопустимое имя конфигурации")
     return templates.TemplateResponse(
         request, "config.html",
-        {"files": files, "current": current, "content": content, "user": user},
+        {"files": files, "current": current, "content": content, "user": user,
+         "imap_credential_source": credential_source},
     )
 
 
@@ -406,6 +416,11 @@ async def api_test_imap(request: Request, user: str = Depends(verify_auth)):
             "folders_count": len(folders),
             "sample_folders": folders[:15],
         }
+    except MissingImapPassword as e:
+        return {"ok": False, "message": str(e)}
+    except ImapAuthenticationError as e:
+        source = "переменная окружения" if e.credential_source == "environment" else "введённое значение"
+        return {"ok": False, "message": f"IMAP отклонил вход; источник пароля: {source}"}
     except Exception as e:
         return {"ok": False, "message": _public_error(e)}
 
@@ -466,7 +481,9 @@ async def api_get_config(filename: str, user: str = Depends(verify_auth)):
         raise HTTPException(400, "Недопустимое имя конфигурации")
     if not path.exists():
         raise HTTPException(404, "Файл не найден")
-    return {"filename": filename, "content": _redacted_yaml(path.read_text(encoding="utf-8"))}
+    source_text = path.read_text(encoding="utf-8")
+    return {"filename": filename, "content": _redacted_yaml(source_text),
+            "imap_credential_source": _imap_credential_source(yaml.safe_load(source_text))}
 
 
 @app.post("/api/config/{filename}")
@@ -531,7 +548,16 @@ async def api_delete_config(filename: str, user: str = Depends(verify_auth)):
 @app.post("/api/validate")
 async def api_validate(request: Request, user: str = Depends(verify_auth)):
     body = await request.json()
-    ok, msg, _ = validate_yaml_text(body.get("content", ""))
+    text = body.get("content", "")
+    filename = body.get("file")
+    if filename:
+        try:
+            text = _restore_yaml(text, filename)
+        except (ValueError, yaml.YAMLError):
+            return {"ok": False, "message": "Недопустимое имя файла или YAML"}
+    elif REDACTED in text:
+        return {"ok": False, "message": "Для проверки скрытых секретов выберите существующий файл"}
+    ok, msg, _ = validate_yaml_text(text)
     return {"ok": ok, "message": msg}
 
 

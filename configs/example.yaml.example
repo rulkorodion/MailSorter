@@ -1,0 +1,45 @@
+# ============================================================
+# Пример конфигурации почтового ящика
+# ============================================================
+
+name: "Пример ящика"
+
+imap:
+  host: "outlook.office365.com"
+  port: 993
+  username: "user@example.com"
+  password: "ENV:MAIL_PASSWORD"
+  inbox_folder: "INBOX"
+  unsorted_folder: "INBOX/Unsorted"
+  poll_interval_seconds: 60
+  ssl_verify: true
+
+llm:
+  endpoint: "http://localhost:11434"
+  model: "qwen2.5:14b"
+  temperature: 0.1
+  max_tokens: 300
+  timeout_seconds: 120
+  max_retries: 3
+
+# Режим Dry Run включён при каждом запуске. Active включается только через веб-интерфейс.
+rules:
+  source_folder: "INBOX"
+  confidence_threshold: 0.75
+  destinations:
+    - folder: "INBOX/Work"
+      condition: "Рабочие задачи и проекты"
+    - folder: "INBOX/Finance"
+      condition: "Счета и бухгалтерия"
+
+web:
+  host: "127.0.0.1"
+  port: 8080
+  admin_username: "admin"
+  admin_password: "CHANGE_ME"  # замените перед запуском
+
+logging:
+  level: "INFO"
+  file: "logs/mailsorter.log"
+  max_size_mb: 50
+  backup_count: 3

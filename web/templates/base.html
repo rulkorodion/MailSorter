@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Mail Sorter{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="logo">📬 Mail Sorter</div>
+      <nav>
+        <a href="/" class="{% if active == 'index' %}active{% endif %}">📊 Обзор</a>
+        <a href="/config" class="{% if active == 'config' %}active{% endif %}">📝 Конфигурация</a>
+        <a href="/rules" class="{% if active == 'rules' %}active{% endif %}">⚙️ Правила</a>
+        <a href="/folders" class="{% if active == 'folders' %}active{% endif %}">📁 Папки</a>
+        <a href="/run" class="{% if active == 'run' %}active{% endif %}">🚀 Запуск</a>
+        <a href="/test" class="{% if active == 'test' %}active{% endif %}">🧪 Тестирование</a>
+        <a href="/logs" class="{% if active == 'logs' %}active{% endif %}">📋 Логи</a>
+      </nav>
+    </aside>
+    <main class="main">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

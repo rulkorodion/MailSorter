@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Первоначальная настройка — Mail Sorter</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .setup-wrap { max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+    .setup-header { text-align: center; margin-bottom: 2rem; }
+    .setup-header h1 { font-size: 1.75rem; margin-bottom: 0.5rem; }
+    .steps { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+    .step-pill { flex: 1; min-width: 100px; text-align: center; padding: 0.5rem; border-radius: 6px;
+      background: var(--surface); border: 1px solid var(--border); font-size: 0.8rem; color: var(--muted); }
+    .step-pill.active { border-color: var(--accent); color: var(--text); background: var(--surface2); }
+    .step-pill.done { border-color: var(--success); color: var(--success); }
+    .step-panel { display: none; }
+    .step-panel.active { display: block; }
+    .nav-btns { display: flex; gap: 0.75rem; justify-content: space-between; margin-top: 1.5rem; }
+    .dest-row { border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem; margin-bottom: 0.75rem; background: var(--surface2); }
+  </style>
+</head>
+<body>
+  <div class="setup-wrap">
+    <div class="setup-header">
+      <div style="font-size: 2.5rem; margin-bottom: 0.5rem">📬</div>
+      <h1>Mail Sorter</h1>
+      <p class="subtitle">Первоначальная настройка</p>
+    </div>
+
+    <div class="steps">
+      <div class="step-pill active" id="pill-1">1. Почта</div>
+      <div class="step-pill" id="pill-2">2. ИИ</div>
+      <div class="step-pill" id="pill-3">3. Правила</div>
+      <div class="step-pill" id="pill-4">4. Веб</div>
+    </div>
+    <div id="msg"></div>
+
+    <div class="card step-panel active" id="step-1">
+      <h2>Подключение к почте</h2>
+      <div class="form-row">
+        <label>Название ящика</label>
+        <input type="text" id="name" value="Основной ящик">
+      </div>
+      <div class="form-row">
+        <label>Email (логин)</label>
+        <input type="text" id="imap_user" placeholder="user@company.com" onblur="tryAutodiscover()">
+      </div>
+      <div class="toolbar" style="margin-bottom:0.75rem">
+        <button type="button" class="btn btn-secondary btn-sm" onclick="tryAutodiscover()">🔍 Автоопределение (Exchange / провайдер)</button>
+        <select id="preset" onchange="applyPreset()" style="width:auto">
+          <option value="">— Пресет —</option>
+          <option value="microsoft365">Microsoft 365 / Exchange Online</option>
+          <option value="outlook_com">Outlook.com</option>
+          <option value="gmail">Gmail</option>
+          <option value="yandex">Yandex</option>
+          <option value="mailru">Mail.ru</option>
+        </select>
+      </div>
+      <div id="ad-msg" class="hint" style="margin-bottom:0.75rem"></div>
+      <div class="form-row"><label>IMAP-сервер</label><input type="text" id="imap_host" value="outlook.office365.com"></div>
+      <div class="form-row"><label>Порт</label><input type="text" id="imap_port" value="993"></div>
+      <div class="form-row"><label>Пароль (или пароль приложения)</label><input type="password" id="imap_pass"></div>
+      <div class="form-row"><label><input type="checkbox" id="pass_as_env"> Хранить как ENV:MAIL_PASSWORD</label></div>
+      <div class="form-row"><label>Папка входящих</label><input type="text" id="inbox_folder" value="INBOX"></div>
+      <div class="form-row"><label>Папка Unsorted</label><input type="text" id="unsorted_folder" value="INBOX/Unsorted"></div>
+      <div class="form-row"><label>Интервал опроса (сек)</label><input type="text" id="poll_interval" value="60"></div>
+      <div class="toolbar">
+        <button type="button" class="btn btn-secondary" onclick="testImap()">🔌 Проверить подключение</button>
+        <span id="imap-test" class="hint"></span>
+      </div>
+      <div class="nav-btns"><span></span><button class="btn btn-primary" onclick="goStep(2)">Далее →</button></div>
+    </div>
+
+    <div class="card step-panel" id="step-2">
+      <h2>Локальный ИИ (Ollama)</h2>
+      <div class="form-row"><label>Адрес Ollama</label><input type="text" id="llm_endpoint" value="http://localhost:11434"></div>
+      <div class="form-row"><label>Модель</label><input type="text" id="llm_model" value="qwen2.5:14b"></div>
+      <div class="form-row"><label>Температура</label><input type="text" id="llm_temp" value="0.1"></div>
+      <div class="form-row"><label>Порог уверенности</label><input type="text" id="confidence" value="0.75"></div>
+      <div class="nav-btns">
+        <button class="btn btn-secondary" onclick="goStep(1)">← Назад</button>
+        <button class="btn btn-primary" onclick="goStep(3)">Далее →</button>
+      </div>
+    </div>
+
+    <div class="card step-panel" id="step-3">
+      <h2>Правила: папка + условие</h2>
+      <div class="help-block">Для каждой папки опишите, какие письма туда должны попадать. Промпт для ИИ соберётся автоматически.</div>
+      <div id="destinations"></div>
+      <button class="btn btn-secondary btn-sm" onclick="addDest()">+ Папка</button>
+      <div class="nav-btns">
+        <button class="btn btn-secondary" onclick="goStep(2)">← Назад</button>
+        <button class="btn btn-primary" onclick="goStep(4)">Далее →</button>
+      </div>
+    </div>
+
+    <div class="card step-panel" id="step-4">
+      <h2>Веб-доступ</h2>
+      <div class="form-row"><label>Имя файла конфига</label><input type="text" id="filename" value="mailbox.yaml"></div>
+      <div class="form-row"><label>Логин веб</label><input type="text" id="web_user" value="admin"></div>
+      <div class="form-row"><label>Пароль веб</label><input type="password" id="web_pass" placeholder="не короче 12 символов"></div>
+      <div class="form-row"><label>Порт</label><input type="text" id="web_port" value="8080"></div>
+      <div class="nav-btns">
+        <button class="btn btn-secondary" onclick="goStep(3)">← Назад</button>
+        <button class="btn btn-success" id="btn-save" onclick="saveSetup()">💾 Сохранить</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+const PRESETS = {
+  microsoft365: {host:'outlook.office365.com', port:993},
+  outlook_com: {host:'outlook.office365.com', port:993},
+  gmail: {host:'imap.gmail.com', port:993},
+  yandex: {host:'imap.yandex.ru', port:993},
+  mailru: {host:'imap.mail.ru', port:993}
+};
+
+let destinations = [
+  {folder:'INBOX/Work', condition:'Письма по работе, проектам, совещаниям и задачам от коллег'},
+  {folder:'INBOX/Finance', condition:'Счета, платежи, банковские уведомления, бухгалтерия'},
+  {folder:'INBOX/Newsletters', condition:'Рассылки, новости, маркетинг, промо'},
+];
+
+function showMsg(t, ok) {
+  document.getElementById('msg').innerHTML = '<div class="alert alert-'+(ok?'success':'error')+'">'+t+'</div>';
+}
+function goStep(n) {
+  if (n===2 && !document.getElementById('imap_user').value.trim()) { showMsg('Укажите email', false); return; }
+  if (n===4) {
+    collectDest();
+    if (!destinations.filter(d=>d.folder&&d.condition).length) { showMsg('Добавьте хотя бы одну папку с условием', false); return; }
+  }
+  document.getElementById('msg').innerHTML = '';
+  document.querySelectorAll('.step-panel').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.step-pill').forEach(p=>p.classList.remove('active','done'));
+  for (let i=1;i<=4;i++) {
+    const pill = document.getElementById('pill-'+i);
+    if (i<n) pill.classList.add('done');
+    if (i===n) pill.classList.add('active');
+  }
+  document.getElementById('step-'+n).classList.add('active');
+  if (n===3) renderDest();
+}
+
+function applyPreset() {
+  const id = document.getElementById('preset').value;
+  if (!PRESETS[id]) return;
+  document.getElementById('imap_host').value = PRESETS[id].host;
+  document.getElementById('imap_port').value = PRESETS[id].port;
+}
+
+async function tryAutodiscover() {
+  const email = document.getElementById('imap_user').value.trim();
+  if (!email || email.indexOf('@')<0) return;
+  const el = document.getElementById('ad-msg');
+  el.textContent = 'Определение настроек...';
+  try {
+    const r = await fetch('/api/autodiscover', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({email})
+    });
+    const d = await r.json();
+    if (d.ok) {
+      document.getElementById('imap_host').value = d.host;
+      document.getElementById('imap_port').value = d.port || 993;
+      if (d.inbox_folder) document.getElementById('inbox_folder').value = d.inbox_folder;
+      el.style.color = 'var(--success)';
+      el.textContent = d.message || ('Найдено: ' + d.host);
+    } else {
+      el.style.color = 'var(--warning)';
+      el.textContent = d.message || 'Не удалось определить';
+    }
+  } catch(e) { el.textContent = String(e); }
+}
+
+async function testImap() {
+  const el = document.getElementById('imap-test');
+  el.textContent = 'проверка...';
+  const useEnv = document.getElementById('pass_as_env').checked;
+  const payload = {
+    host: document.getElementById('imap_host').value.trim(),
+    port: parseInt(document.getElementById('imap_port').value,10)||993,
+    username: document.getElementById('imap_user').value.trim(),
+    password: useEnv ? 'ENV:MAIL_PASSWORD' : document.getElementById('imap_pass').value,
+    inbox_folder: document.getElementById('inbox_folder').value.trim()||'INBOX'
+  };
+  try {
+    const r = await fetch('/api/test-imap', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+    const d = await r.json();
+    el.style.color = d.ok ? 'var(--success)' : 'var(--danger)';
+    el.textContent = d.ok ? ('✓ ' + d.message) : ('✗ ' + d.message);
+  } catch(e) { el.style.color='var(--danger)'; el.textContent=String(e); }
+}
+
+function renderDest() {
+  const box = document.getElementById('destinations');
+  box.innerHTML = destinations.map((d,i) =>
+    '<div class="dest-row">'+
+    '<div class="form-row"><label>Папка</label><input data-i="'+i+'" data-f="folder" value="'+esc(d.folder)+'"></div>'+
+    '<div class="form-row"><label>Условие для ИИ</label><textarea data-i="'+i+'" data-f="condition" style="min-height:70px">'+esc(d.condition)+'</textarea></div>'+
+    '<button class="btn btn-danger btn-sm" onclick="destinations.splice('+i+',1);renderDest()">Удалить</button></div>'
+  ).join('');
+  box.querySelectorAll('[data-f]').forEach(el => {
+    el.addEventListener('input', () => { destinations[parseInt(el.dataset.i,10)][el.dataset.f] = el.value; });
+  });
+}
+function esc(s){ const d=document.createElement('div'); d.textContent=s||''; return d.innerHTML; }
+function addDest() {
+  collectDest();
+  destinations.push({folder:'INBOX/New', condition:''});
+  renderDest();
+}
+function collectDest() {
+  document.querySelectorAll('#destinations [data-f]').forEach(el => {
+    destinations[parseInt(el.dataset.i,10)][el.dataset.f] = el.value;
+  });
+}
+
+async function saveSetup() {
+  collectDest();
+  const webPass = document.getElementById('web_pass').value;
+  if (!webPass || webPass.length < 12) { showMsg('Задайте пароль веб (мин. 12)', false); return; }
+  const dest = destinations.filter(d => d.folder && d.condition);
+  if (!dest.length) { showMsg('Нужна хотя бы одна папка с условием', false); return; }
+  const useEnv = document.getElementById('pass_as_env').checked;
+  const payload = {
+    filename: document.getElementById('filename').value.trim()||'mailbox.yaml',
+    name: document.getElementById('name').value.trim()||'Основной ящик',
+    imap: {
+      host: document.getElementById('imap_host').value.trim(),
+      port: parseInt(document.getElementById('imap_port').value,10)||993,
+      username: document.getElementById('imap_user').value.trim(),
+      password: useEnv ? 'ENV:MAIL_PASSWORD' : document.getElementById('imap_pass').value,
+      inbox_folder: document.getElementById('inbox_folder').value.trim()||'INBOX',
+      unsorted_folder: document.getElementById('unsorted_folder').value.trim()||'INBOX/Unsorted',
+      poll_interval_seconds: parseInt(document.getElementById('poll_interval').value,10)||60
+    },
+    llm: {
+      endpoint: document.getElementById('llm_endpoint').value.trim(),
+      model: document.getElementById('llm_model').value.trim(),
+      temperature: parseFloat(document.getElementById('llm_temp').value)||0.1
+    },
+    confidence_threshold: parseFloat(document.getElementById('confidence').value)||0.75,
+    destinations: dest,
+    web: {
+      admin_username: document.getElementById('web_user').value.trim()||'admin',
+      admin_password: webPass,
+      port: parseInt(document.getElementById('web_port').value,10)||8080
+    }
+  };
+  const btn = document.getElementById('btn-save');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/setup', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+    const d = await r.json();
+    if (d.ok) {
+      showMsg('Сохранено. Через 2 сек откроется интерфейс — войдите с новым паролем.', true);
+      setTimeout(() => location.href = '/', 2000);
+    } else {
+      showMsg(d.error||'Ошибка', false);
+      btn.disabled = false;
+    }
+  } catch(e) { showMsg(String(e), false); btn.disabled = false; }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,327 @@
+{% extends "base.html" %}
+{% set active = "rules" %}
+{% block title %}Правила — Mail Sorter{% endblock %}
+
+{% block content %}
+<h1>Правила сортировки</h1>
+<p class="subtitle">Для каждой папки назначения — условие. Можно сгенерировать автоматически по письмам в папке.</p>
+
+<div class="help-block">
+  <strong>Вручную:</strong> опишите, какие письма должны попадать в папку.<br>
+  <strong>Автоправило:</strong> ИИ читает письма <em>уже лежащие в папке назначения</em>, делает саммари и предлагает черновик условия — вы подтверждаете или правите.
+</div>
+
+{% if not files %}
+<div class="alert alert-info">Нет конфигов.</div>
+{% else %}
+
+<div class="form-row" style="max-width:320px">
+  <label>Ящик</label>
+  <select id="cfg-file" onchange="loadRules()">
+    {% for f in files %}<option value="{{ f }}">{{ f }}</option>{% endfor %}
+  </select>
+</div>
+
+<div class="card">
+  <div class="form-row">
+    <label>Папка-источник (откуда брать письма для сортировки)</label>
+    <input type="text" id="source_folder" value="INBOX">
+  </div>
+  <div class="form-row">
+    <label>Порог уверенности (0–1)</label>
+    <input type="text" id="threshold" value="0.75" style="max-width:120px">
+  </div>
+</div>
+
+<div id="msg"></div>
+<div id="dest-list"></div>
+
+<div class="toolbar">
+  <button class="btn btn-secondary" onclick="addDest()">+ Папка с условием</button>
+  <button class="btn btn-secondary" onclick="previewPrompt()">👁 Предпросмотр промпта</button>
+  <button class="btn btn-primary" onclick="saveRules()">💾 Сохранить</button>
+</div>
+
+<div class="card" id="prompt-preview" style="display:none; margin-top:1rem">
+  <h2>Собранный system prompt</h2>
+  <pre id="prompt-text" class="log-box" style="white-space:pre-wrap; max-height:40vh"></pre>
+</div>
+
+<!-- Модалка автоправила -->
+<div id="ar-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:2000; align-items:center; justify-content:center">
+  <div class="card" style="max-width:560px; width:92%; max-height:90vh; overflow:auto; margin:2rem auto">
+    <h2>Автоправило</h2>
+    <p class="hint" id="ar-folder-label"></p>
+    <div id="ar-setup">
+      <div class="form-row">
+        <label>Сколько писем проанализировать</label>
+        <select id="ar-limit">
+          <option value="10">10</option>
+          <option value="25" selected>25</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+        </select>
+      </div>
+      <div class="hint">Минимум 3 письма в папке. Письма не перемещаются — только чтение.</div>
+      <div class="toolbar" style="margin-top:1rem">
+        <button class="btn btn-primary" onclick="startAutorule()">▶ Запустить</button>
+        <button class="btn btn-secondary" onclick="closeAutorule()">Отмена</button>
+      </div>
+    </div>
+    <div id="ar-progress" style="display:none">
+      <div class="alert alert-info" id="ar-status-text">Подготовка...</div>
+      <div style="background:var(--bg); border-radius:6px; height:10px; overflow:hidden; margin:0.75rem 0">
+        <div id="ar-bar" style="height:100%; width:0%; background:var(--accent); transition:width 0.3s"></div>
+      </div>
+      <div class="hint" id="ar-detail"></div>
+      <button class="btn btn-secondary btn-sm" onclick="cancelAutorule()">⏹ Отменить</button>
+    </div>
+    <div id="ar-draft" style="display:none">
+      <div class="alert alert-success">Черновик условия (ещё не сохранён в правила)</div>
+      <div class="form-row">
+        <label>Условие — можно отредактировать</label>
+        <textarea id="ar-condition" style="min-height:120px"></textarea>
+      </div>
+      <details style="margin-bottom:1rem">
+        <summary class="hint" style="cursor:pointer">Последние саммари</summary>
+        <pre id="ar-summaries" class="log-box" style="max-height:160px; font-size:0.75rem"></pre>
+      </details>
+      <div class="toolbar">
+        <button class="btn btn-success" onclick="applyDraft()">✓ Применить к правилу</button>
+        <button class="btn btn-secondary" onclick="startAutorule()">↻ Перегенерировать</button>
+        <button class="btn btn-secondary" onclick="closeAutorule()">Закрыть</button>
+      </div>
+    </div>
+    <div id="ar-error" style="display:none">
+      <div class="alert alert-error" id="ar-error-text"></div>
+      <button class="btn btn-secondary" onclick="closeAutorule()">Закрыть</button>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+let destinations = [];
+let arJobId = null;
+let arDestIndex = null;
+let arPollTimer = null;
+
+function showMsg(t, ok) {
+  document.getElementById('msg').innerHTML = '<div class="alert alert-'+(ok?'success':'error')+'">'+t+'</div>';
+}
+function esc(s){ const d=document.createElement('div'); d.textContent=s==null?'':s; return d.innerHTML; }
+
+function render() {
+  const box = document.getElementById('dest-list');
+  if (!destinations.length) {
+    box.innerHTML = '<div class="alert alert-info">Добавьте папку и условие — вручную или через автоправило.</div>';
+    return;
+  }
+  let html = '';
+  destinations.forEach((d, i) => {
+    html += '<div class="card">';
+    html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;gap:0.5rem;flex-wrap:wrap">';
+    html += '<strong>Правило '+(i+1)+'</strong>';
+    html += '<div class="toolbar" style="margin:0">';
+    html += '<button class="btn btn-secondary btn-sm" onclick="openAutorule('+i+')">✨ Автоправило</button>';
+    html += '<button class="btn btn-danger btn-sm" onclick="removeDest('+i+')">Удалить</button>';
+    html += '</div></div>';
+    html += '<div class="form-row"><label>Папка назначения</label>';
+    html += '<input type="text" data-i="'+i+'" data-f="folder" value="'+esc(d.folder)+'" placeholder="INBOX/Access"></div>';
+    html += '<div class="form-row"><label>Условие для ИИ</label>';
+    html += '<textarea data-i="'+i+'" data-f="condition" style="min-height:90px" placeholder="Какие письма должны попадать в эту папку">'+esc(d.condition)+'</textarea></div>';
+    html += '</div>';
+  });
+  box.innerHTML = html;
+  box.querySelectorAll('[data-f]').forEach(el => {
+    el.addEventListener('input', () => {
+      destinations[parseInt(el.dataset.i,10)][el.dataset.f] = el.value;
+    });
+  });
+}
+
+function collect() {
+  document.querySelectorAll('[data-f]').forEach(el => {
+    destinations[parseInt(el.dataset.i,10)][el.dataset.f] = el.value;
+  });
+}
+
+function addDest() {
+  collect();
+  destinations.push({folder: 'INBOX/New', condition: ''});
+  render();
+}
+function removeDest(i) {
+  collect();
+  destinations.splice(i, 1);
+  render();
+}
+
+async function loadRules() {
+  const f = document.getElementById('cfg-file').value;
+  const r = await fetch('/api/rules/' + encodeURIComponent(f));
+  const d = await r.json();
+  if (!d.ok) { showMsg(d.error||'Ошибка', false); return; }
+  document.getElementById('source_folder').value = d.source_folder || 'INBOX';
+  document.getElementById('threshold').value = d.confidence_threshold != null ? d.confidence_threshold : 0.75;
+  destinations = d.destinations || [];
+  render();
+  if (d.system_prompt) {
+    document.getElementById('prompt-preview').style.display = 'block';
+    document.getElementById('prompt-text').textContent = d.system_prompt;
+  }
+  showMsg('Загружено: ' + destinations.length + ' правил', true);
+}
+
+async function previewPrompt() {
+  collect();
+  const r = await fetch('/api/preview-prompt', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({destinations})
+  });
+  const d = await r.json();
+  document.getElementById('prompt-preview').style.display = 'block';
+  document.getElementById('prompt-text').textContent = d.system_prompt || '';
+}
+
+async function saveRules() {
+  collect();
+  for (const d of destinations) {
+    if (!d.folder || !d.condition) {
+      showMsg('У каждой записи должны быть папка и условие', false);
+      return;
+    }
+  }
+  if (!destinations.length) { showMsg('Добавьте хотя бы одно правило', false); return; }
+  const f = document.getElementById('cfg-file').value;
+  const payload = {
+    source_folder: document.getElementById('source_folder').value.trim() || 'INBOX',
+    confidence_threshold: parseFloat(document.getElementById('threshold').value) || 0.75,
+    destinations
+  };
+  const r = await fetch('/api/rules/' + encodeURIComponent(f), {
+    method:'PUT', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(payload)
+  });
+  const d = await r.json();
+  showMsg(d.message || d.error || (d.ok?'OK':'Ошибка'), !!d.ok);
+  if (d.ok && d.system_prompt) {
+    document.getElementById('prompt-preview').style.display = 'block';
+    document.getElementById('prompt-text').textContent = d.system_prompt;
+  }
+}
+
+/* ---- Автоправило ---- */
+function openAutorule(idx) {
+  collect();
+  arDestIndex = idx;
+  const folder = destinations[idx].folder;
+  if (!folder) { alert('Сначала укажите путь папки назначения'); return; }
+  document.getElementById('ar-folder-label').textContent = 'Папка назначения: ' + folder;
+  document.getElementById('ar-setup').style.display = 'block';
+  document.getElementById('ar-progress').style.display = 'none';
+  document.getElementById('ar-draft').style.display = 'none';
+  document.getElementById('ar-error').style.display = 'none';
+  document.getElementById('ar-modal').style.display = 'flex';
+  arJobId = null;
+}
+
+function closeAutorule() {
+  if (arPollTimer) { clearInterval(arPollTimer); arPollTimer = null; }
+  if (arJobId) cancelAutorule();
+  document.getElementById('ar-modal').style.display = 'none';
+}
+
+async function startAutorule() {
+  collect();
+  const folder = destinations[arDestIndex].folder;
+  const limit = parseInt(document.getElementById('ar-limit').value, 10) || 25;
+  document.getElementById('ar-setup').style.display = 'none';
+  document.getElementById('ar-draft').style.display = 'none';
+  document.getElementById('ar-error').style.display = 'none';
+  document.getElementById('ar-progress').style.display = 'block';
+  document.getElementById('ar-status-text').textContent = 'Запуск...';
+  document.getElementById('ar-bar').style.width = '0%';
+  try {
+    const r = await fetch('/api/autorule/start', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        file: document.getElementById('cfg-file').value,
+        folder: folder,
+        limit: limit
+      })
+    });
+    const d = await r.json();
+    if (!d.ok) {
+      showArError(d.error || 'Не удалось запустить');
+      return;
+    }
+    arJobId = d.job.id;
+    if (arPollTimer) clearInterval(arPollTimer);
+    arPollTimer = setInterval(pollAutorule, 1500);
+    pollAutorule();
+  } catch(e) {
+    showArError(String(e));
+  }
+}
+
+async function pollAutorule() {
+  if (!arJobId) return;
+  try {
+    const r = await fetch('/api/autorule/' + encodeURIComponent(arJobId));
+    const d = await r.json();
+    if (!d.ok) return;
+    const j = d.job;
+    const pct = j.total ? Math.round(100 * j.current / j.total) : 0;
+    document.getElementById('ar-bar').style.width = pct + '%';
+    if (j.phase === 'summary') {
+      document.getElementById('ar-status-text').textContent =
+        'Саммари писем: ' + j.current + ' / ' + j.total;
+    } else if (j.phase === 'synthesize') {
+      document.getElementById('ar-status-text').textContent = 'Формирование правила...';
+      document.getElementById('ar-bar').style.width = '100%';
+    }
+    const last = (j.summaries || []).map(s => '• ' + s.subject + '\n  ' + s.summary).join('\n');
+    document.getElementById('ar-detail').textContent = last ? ('Последние:\n' + last) : '';
+
+    if (j.status === 'done') {
+      clearInterval(arPollTimer); arPollTimer = null;
+      document.getElementById('ar-progress').style.display = 'none';
+      document.getElementById('ar-draft').style.display = 'block';
+      document.getElementById('ar-condition').value = j.draft_condition || '';
+      document.getElementById('ar-summaries').textContent =
+        (j.summaries || []).map(s => '[' + s.subject + ']\n' + s.summary).join('\n\n');
+    } else if (j.status === 'error' || j.status === 'cancelled') {
+      clearInterval(arPollTimer); arPollTimer = null;
+      showArError(j.error || (j.status === 'cancelled' ? 'Отменено' : 'Ошибка'));
+    }
+  } catch(e) {}
+}
+
+async function cancelAutorule() {
+  if (!arJobId) return;
+  await fetch('/api/autorule/' + encodeURIComponent(arJobId) + '/cancel', {method:'POST'});
+}
+
+function showArError(msg) {
+  document.getElementById('ar-setup').style.display = 'none';
+  document.getElementById('ar-progress').style.display = 'none';
+  document.getElementById('ar-draft').style.display = 'none';
+  document.getElementById('ar-error').style.display = 'block';
+  document.getElementById('ar-error-text').textContent = msg;
+}
+
+function applyDraft() {
+  const text = document.getElementById('ar-condition').value.trim();
+  if (!text) { alert('Условие пустое'); return; }
+  destinations[arDestIndex].condition = text;
+  render();
+  closeAutorule();
+  showMsg('Черновик применён к правилу. Нажмите «Сохранить», чтобы записать в конфиг.', true);
+}
+
+if (document.getElementById('cfg-file')) loadRules();
+</script>
+{% endblock %}

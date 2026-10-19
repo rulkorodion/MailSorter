@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+venv/
+.venv/
+
+# Local mailbox configuration and secrets
+configs/*.yaml
+configs/*.yml
+!configs/*.yaml.example
+!configs/*.yml.example
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Runtime data
+logs/*
+!logs/.gitkeep
+*.log
+*.db
+*.sqlite
+*.sqlite3
+*.tmp
+*.bak
+*.swp
+~$*
+
+# Editor and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

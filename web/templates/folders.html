@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+{% set active = "folders" %}
+{% block title %}Папки — Mail Sorter{% endblock %}
+
+{% block content %}
+<h1>Папки IMAP</h1>
+<p class="subtitle">Интерактивное дерево: создание, переименование, перемещение, удаление</p>
+
+{% if not status_list %}
+<div class="alert alert-info">Нет загруженных ящиков.</div>
+{% else %}
+
+<div class="form-row" style="max-width: 320px">
+  <label>Ящик</label>
+  <select id="cfg-file" onchange="loadTree()">
+    {% for s in status_list %}
+    <option value="{{ s.config_file }}">{{ s.name }} ({{ s.config_file }})</option>
+    {% endfor %}
+  </select>
+</div>
+
+<div class="card">
+  <div class="toolbar">
+    <button class="btn btn-secondary btn-sm" onclick="loadTree()">↻ Обновить</button>
+    <button class="btn btn-secondary btn-sm" onclick="checkFolders(false)">🔍 Проверить правила</button>
+    <button class="btn btn-primary btn-sm" onclick="checkFolders(true)">📁 Создать недостающие из правил</button>
+    <button class="btn btn-success btn-sm" onclick="createRoot()">+ Новая папка</button>
+  </div>
+  <div id="check-result" style="margin-top:0.5rem"></div>
+  <div id="tree-box" class="tree-wrap" style="margin-top:1rem">Загрузка...</div>
+</div>
+
+<!-- Контекстное меню -->
+<div id="ctx" class="ctx-menu" style="display:none">
+  <button onclick="ctxAction('sub')">+ Вложенная папка</button>
+  <button onclick="ctxAction('rename')">✎ Переименовать / переместить</button>
+  <button onclick="ctxAction('delete')" class="danger">✕ Удалить</button>
+</div>
+
+<style>
+.tree-wrap { font-size: 0.9rem; }
+.tree-node { padding: 0.25rem 0; }
+.tree-row {
+  display: flex; align-items: center; gap: 0.4rem;
+  padding: 0.35rem 0.5rem; border-radius: 6px; cursor: pointer;
+}
+.tree-row:hover, .tree-row.selected { background: var(--surface2); }
+.tree-children { margin-left: 1.25rem; border-left: 1px solid var(--border); padding-left: 0.5rem; }
+.tree-toggle { width: 1.2rem; color: var(--muted); user-select: none; }
+.ctx-menu {
+  position: fixed; z-index: 1000; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 8px; padding: 0.35rem;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4); min-width: 200px;
+}
+.ctx-menu button {
+  display: block; width: 100%; text-align: left; background: none; border: none;
+  color: var(--text); padding: 0.5rem 0.75rem; border-radius: 4px; cursor: pointer;
+  font-family: inherit; font-size: 0.9rem;
+}
+.ctx-menu button:hover { background: var(--surface2); }
+.ctx-menu button.danger { color: var(--danger); }
+</style>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+let selectedPath = null;
+let delim = '/';
+
+function cfg() { return document.getElementById('cfg-file').value; }
+
+function renderNode(n, depth) {
+  const has = n.children && n.children.length;
+  let html = '<div class="tree-node" data-path="' + escAttr(n.path) + '">';
+  html += '<div class="tree-row" oncontextmenu="openCtx(event,\'' + escAttr(n.path) + '\')" onclick="selectRow(event,\'' + escAttr(n.path) + '\')">';
+  html += '<span class="tree-toggle" onclick="toggle(event, this)">' + (has ? '▼' : '·') + '</span>';
+  html += (has ? '📂' : '📄') + ' <code>' + esc(n.path) + '</code>';
+  html += '</div>';
+  if (has) {
+    html += '<div class="tree-children">';
+    n.children.forEach(c => { html += renderNode(c, depth + 1); });
+    html += '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function esc(s) {
+  const d = document.createElement('div'); d.textContent = s; return d.innerHTML;
+}
+function escAttr(s) { return String(s).replace(/\\/g,'\\\\').replace(/'/g, "\\'"); }
+
+function toggle(e, el) {
+  e.stopPropagation();
+  const kids = el.parentElement.nextElementSibling;
+  if (!kids || !kids.classList.contains('tree-children')) return;
+  const hide = kids.style.display !== 'none';
+  kids.style.display = hide ? 'none' : 'block';
+  el.textContent = hide ? '▶' : '▼';
+}
+
+function selectRow(e, path) {
+  selectedPath = path;
+  document.querySelectorAll('.tree-row').forEach(r => r.classList.remove('selected'));
+  e.currentTarget.classList.add('selected');
+}
+
+function openCtx(e, path) {
+  e.preventDefault();
+  selectedPath = path;
+  const m = document.getElementById('ctx');
+  m.style.display = 'block';
+  m.style.left = e.clientX + 'px';
+  m.style.top = e.clientY + 'px';
+}
+document.addEventListener('click', () => { document.getElementById('ctx').style.display = 'none'; });
+
+async function ctxAction(act) {
+  document.getElementById('ctx').style.display = 'none';
+  if (!selectedPath) return;
+  if (act === 'sub') {
+    const name = prompt('Имя вложенной папки (только имя, не путь):');
+    if (!name) return;
+    await apiCreate(selectedPath + delim + name.trim());
+  } else if (act === 'rename') {
+    const neu = prompt('Новый полный путь папки:', selectedPath);
+    if (!neu || neu === selectedPath) return;
+    await apiRename(selectedPath, neu.trim());
+  } else if (act === 'delete') {
+    if (!confirm('Удалить «' + selectedPath + '»?')) return;
+    await apiDelete(selectedPath);
+  }
+}
+
+async function createRoot() {
+  const name = prompt('Полный путь новой папки (например INBOX/Projects):');
+  if (!name) return;
+  await apiCreate(name.trim());
+}
+
+async function apiCreate(name) {
+  const r = await fetch('/api/folders/' + encodeURIComponent(cfg()) + '/create', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name})
+  });
+  const d = await r.json();
+  alert(d.ok ? 'Создано: ' + d.name : d.error);
+  if (d.ok) loadTree();
+}
+async function apiRename(old_name, new_name) {
+  const r = await fetch('/api/folders/' + encodeURIComponent(cfg()) + '/rename', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({old_name, new_name})
+  });
+  const d = await r.json();
+  alert(d.ok ? 'Готово' : d.error);
+  if (d.ok) loadTree();
+}
+async function apiDelete(name) {
+  const r = await fetch('/api/folders/' + encodeURIComponent(cfg()) + '/delete', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name})
+  });
+  const d = await r.json();
+  alert(d.ok ? 'Удалено' : d.error);
+  if (d.ok) loadTree();
+}
+
+async function loadTree() {
+  const box = document.getElementById('tree-box');
+  box.textContent = 'Загрузка...';
+  try {
+    const r = await fetch('/api/folders/' + encodeURIComponent(cfg()));
+    const d = await r.json();
+    if (!d.ok) { box.innerHTML = '<div class="alert alert-error">' + esc(d.error||'Ошибка') + '</div>'; return; }
+    delim = d.delimiter || '/';
+    if (!d.tree || !d.tree.length) { box.textContent = 'Папок нет'; return; }
+    box.innerHTML = d.tree.map(n => renderNode(n, 0)).join('') +
+      '<div class="hint" style="margin-top:0.75rem">ПКМ по папке — создать вложенную, переименовать, удалить. Разделитель: ' + delim + '</div>';
+  } catch(e) { box.textContent = String(e); }
+}
+
+async function checkFolders(create) {
+  const box = document.getElementById('check-result');
+  box.innerHTML = '<div class="alert alert-info">...</div>';
+  const r = await fetch('/api/check-folders?file=' + encodeURIComponent(cfg()) + '&create=' + create, {method:'POST'});
+  const d = await r.json();
+  let html = '<table><tr><th>Папка</th><th>Статус</th></tr>';
+  (d.folders||[]).forEach(f => {
+    const color = f.status==='exists'?'var(--success)':f.status==='created'?'var(--accent)':f.status==='missing'?'var(--warning)':'var(--danger)';
+    html += '<tr><td>'+esc(f.name)+'</td><td style="color:'+color+'">'+f.status+(f.error?': '+esc(f.error):'')+'</td></tr>';
+  });
+  html += '</table>';
+  box.innerHTML = html;
+  if (create) loadTree();
+}
+
+if (document.getElementById('cfg-file')) loadTree();
+</script>
+{% endblock %}

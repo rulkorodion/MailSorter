@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% set active = "run" %}
+{% block title %}Запуск — Mail Sorter{% endblock %}
+
+{% block content %}
+<h1>Запуск алгоритма</h1>
+<p class="subtitle">Принудительный обход писем вне расписания</p>
+
+<div class="help-block">
+  Обычный опрос идёт автоматически по интервалу из конфига.
+  Здесь можно запустить обработку немедленно. Статус обновляется каждые 3 секунды.
+</div>
+
+<div class="card">
+  <div class="toolbar">
+    <button class="btn btn-primary" onclick="runAll()">▶ Запустить все ящики</button>
+  </div>
+</div>
+
+<div id="status-area">
+{% for s in status_list %}
+<div class="card" id="card-{{ s.config_file }}">
+  <h2>
+    {{ s.name }}
+    <span class="badge badge-{{ s.status }}" id="badge-{{ s.config_file }}">{{ s.status }}</span>
+  </h2>
+  <div class="alert {{ 'alert-error' if s.mode == 'active' else 'alert-info' }}" id="mode-{{ s.config_file }}">
+    Режим: <strong>{{ 'ACTIVE — письма перемещаются' if s.mode == 'active' else 'DRY RUN — письма не изменяются' }}</strong>
+  </div>
+  <div class="meta">файл: {{ s.config_file }} · интервал: {{ s.poll_interval }} сек</div>
+  <div style="margin: 0.75rem 0" id="stats-{{ s.config_file }}">
+    Обработано: <strong>{{ s.processed }}</strong> ·
+    Перемещено: <strong>{{ s.moved }}</strong> ·
+    Запланировано: <strong>{{ s.planned }}</strong> ·
+    Unsorted: <strong>{{ s.unsorted }}</strong> ·
+    Ошибок: <strong>{{ s.errors }}</strong>
+  </div>
+  <button class="btn btn-secondary btn-sm" onclick="runOne('{{ s.config_file }}')">
+    ▶ Запустить этот ящик
+  </button>
+  <button class="btn btn-danger btn-sm" onclick="activate('{{ s.config_file }}')">Включить Active</button>
+  <button class="btn btn-secondary btn-sm" onclick="deactivate('{{ s.config_file }}')">Вернуть Dry Run</button>
+  <details><summary>Результаты последнего прохода</summary><pre id="details-{{ s.config_file }}" class="log-box"></pre></details>
+  {% if s.last_error %}
+  <div class="alert alert-error" style="margin-top: 0.5rem">{{ s.last_error }}</div>
+  {% endif %}
+</div>
+{% endfor %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function runAll() {
+  await fetch('/api/run', {method: 'POST'});
+}
+async function runOne(file) {
+  await fetch('/api/run?file=' + encodeURIComponent(file), {method: 'POST'});
+}
+
+async function activate(file) {
+  const confirmation = prompt('Реальное перемещение писем для ' + file + '. Введите точно: ACTIVE ' + file);
+  if (confirmation !== 'ACTIVE ' + file) return;
+  const r = await fetch('/api/mode/' + encodeURIComponent(file), {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({mode:'active', confirmation})
+  });
+  const d = await r.json();
+  if (!r.ok || !d.ok) alert(d.error || 'Не удалось включить Active');
+  await refresh();
+}
+
+async function deactivate(file) {
+  await fetch('/api/mode/' + encodeURIComponent(file), {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({mode:'dry_run'})
+  });
+  await refresh();
+}
+
+async function refresh() {
+  try {
+    const r = await fetch('/api/status');
+    const list = await r.json();
+    list.forEach(s => {
+      const badge = document.getElementById('badge-' + s.config_file);
+      const stats = document.getElementById('stats-' + s.config_file);
+      const mode = document.getElementById('mode-' + s.config_file);
+      const details = document.getElementById('details-' + s.config_file);
+      if (badge) {
+        badge.className = 'badge badge-' + s.status;
+        badge.textContent = s.status;
+      }
+      if (stats) {
+        stats.innerHTML =
+          'Обработано: <strong>' + s.processed + '</strong> · ' +
+          'Перемещено: <strong>' + s.moved + '</strong> · ' +
+          'Запланировано: <strong>' + s.planned + '</strong> · ' +
+          'Unsorted: <strong>' + s.unsorted + '</strong> · ' +
+          'Ошибок: <strong>' + s.errors + '</strong>';
+      }
+      if (mode) {
+        mode.className = 'alert ' + (s.mode === 'active' ? 'alert-error' : 'alert-info');
+        mode.textContent = s.mode === 'active' ? 'Режим: ACTIVE — письма перемещаются' : 'Режим: DRY RUN — письма не изменяются';
+      }
+      if (details) details.textContent = JSON.stringify(s.details || [], null, 2);
+    });
+  } catch(e) {}
+}
+setInterval(refresh, 3000);
+</script>
+{% endblock %}

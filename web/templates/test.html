@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% set active = "test" %}
+{% block title %}Тестирование — Mail Sorter{% endblock %}
+
+{% block content %}
+<h1>Тестирование</h1>
+<p class="subtitle">Проверка классификации: вручную или по письму из ящика</p>
+
+{% if not files %}
+<div class="alert alert-info">Нет конфигов.</div>
+{% else %}
+
+<div class="form-row" style="max-width:320px">
+  <label>Ящик</label>
+  <select id="cfg-file" onchange="onCfgChange()">
+    {% for f in files %}<option value="{{ f }}">{{ f }}</option>{% endfor %}
+  </select>
+</div>
+
+<div class="card">
+  <h2>Письмо из ящика</h2>
+  <div class="toolbar">
+    <button class="btn btn-secondary btn-sm" onclick="loadMessages()">↻ Загрузить письма</button>
+  </div>
+  <div id="msg-list" class="hint" style="margin-top:0.5rem">Нажмите «Загрузить письма»</div>
+</div>
+
+<div class="card">
+  <h2>Данные письма</h2>
+  <div class="form-row"><label>Отправитель</label><input type="text" id="sender" value="sender@example.com"></div>
+  <div class="form-row"><label>Тема</label><input type="text" id="subject"></div>
+  <div class="form-row"><label>Текст</label><textarea id="body" style="min-height:160px"></textarea></div>
+  <button class="btn btn-primary" onclick="classify()">🧪 Классифицировать</button>
+  <div id="result" style="margin-top:1rem"></div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+function onCfgChange() {
+  document.getElementById('msg-list').innerHTML = 'Нажмите «Загрузить письма»';
+}
+
+async function loadMessages() {
+  const box = document.getElementById('msg-list');
+  box.innerHTML = 'Загрузка...';
+  const f = document.getElementById('cfg-file').value;
+  try {
+    const r = await fetch('/api/messages/' + encodeURIComponent(f) + '?limit=25');
+    const d = await r.json();
+    if (!d.ok) { box.innerHTML = '<div class="alert alert-error">'+(d.error||'Ошибка')+'</div>'; return; }
+    if (!d.messages || !d.messages.length) { box.innerHTML = 'Писем нет в '+d.folder; return; }
+    let html = '<table><tr><th>От</th><th>Тема</th><th>Дата</th><th></th></tr>';
+    d.messages.forEach((m, i) => {
+      html += '<tr><td style="max-width:140px;overflow:hidden;text-overflow:ellipsis">'+esc(m.from)+'</td>';
+      html += '<td>'+esc(m.subject)+'</td><td style="white-space:nowrap;font-size:0.8rem">'+esc(m.date).slice(0,19)+'</td>';
+      html += '<td><button class="btn btn-secondary btn-sm" onclick="pickMsg('+i+')">Выбрать</button></td></tr>';
+    });
+    html += '</table>';
+    box.innerHTML = html;
+    window._msgs = d.messages;
+  } catch(e) { box.innerHTML = String(e); }
+}
+
+function pickMsg(i) {
+  const m = window._msgs[i];
+  if (!m) return;
+  document.getElementById('sender').value = m.from || '';
+  document.getElementById('subject').value = m.subject || '';
+  document.getElementById('body').value = m.text || m.text_preview || '';
+}
+
+function esc(s){ const d=document.createElement('div'); d.textContent=s||''; return d.innerHTML; }
+
+async function classify() {
+  const box = document.getElementById('result');
+  box.innerHTML = '<div class="alert alert-info">Запрос к модели...</div>';
+  const payload = {
+    file: document.getElementById('cfg-file').value,
+    sender: document.getElementById('sender').value,
+    subject: document.getElementById('subject').value,
+    text: document.getElementById('body').value
+  };
+  try {
+    const r = await fetch('/api/test', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+    const d = await r.json();
+    if (d.ok) {
+      box.innerHTML = '<div class="alert alert-success"><strong>Папка:</strong> '+esc(d.result.category)+
+        '<br><strong>Уверенность:</strong> '+(d.result.confidence*100).toFixed(1)+'%</div>';
+    } else {
+      box.innerHTML = '<div class="alert alert-error">'+(d.error||'Ошибка')+'</div>';
+    }
+  } catch(e) { box.innerHTML = '<div class="alert alert-error">'+e+'</div>'; }
+}
+</script>
+{% endblock %}

@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% set active = "logs" %}
+{% block title %}Логи — Mail Sorter{% endblock %}
+
+{% block content %}
+<h1>Логи</h1>
+<p class="subtitle">Последние 200 строк · автообновление каждые 5 сек</p>
+
+<div class="toolbar">
+  <button class="btn btn-secondary btn-sm" onclick="loadLogs()">↻ Обновить</button>
+  <label style="display:inline; margin-left: 1rem">
+    <input type="checkbox" id="auto" checked> Автообновление
+  </label>
+</div>
+
+<div class="log-box" id="log-box">Загрузка...</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadLogs() {
+  try {
+    const r = await fetch('/api/logs?lines=200');
+    const d = await r.json();
+    const box = document.getElementById('log-box');
+    box.textContent = (d.lines || []).join('');
+    box.scrollTop = box.scrollHeight;
+  } catch(e) {
+    document.getElementById('log-box').textContent = 'Ошибка: ' + e;
+  }
+}
+loadLogs();
+setInterval(() => {
+  if (document.getElementById('auto').checked) loadLogs();
+}, 5000);
+</script>
+{% endblock %}

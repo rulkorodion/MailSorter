@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% set active = "index" %}
+{% block title %}Обзор — Mail Sorter{% endblock %}
+
+{% block content %}
+<h1>Обзор</h1>
+<p class="subtitle">Статус почтовых ящиков и проверка подключения</p>
+
+{% if not status_list %}
+<div class="alert alert-info">Нет ящиков. Создайте конфиг.</div>
+{% else %}
+<div class="status-grid" id="status-grid">
+  {% for s in status_list %}
+  <div class="status-card">
+    <div class="name">{{ s.name }}</div>
+    <div class="alert {{ 'alert-error' if s.mode == 'active' else 'alert-info' }}">{{ 'ACTIVE — письма перемещаются' if s.mode == 'active' else 'DRY RUN — без изменений почты' }}</div>
+    <div class="meta">файл: {{ s.config_file }}</div>
+    <div style="margin: 0.5rem 0">
+      <span class="badge badge-{{ s.status }}">{{ s.status }}</span>
+    </div>
+    <div class="meta">
+      Обработано: {{ s.processed }} · Запланировано: {{ s.planned }} · Перемещено: {{ s.moved }} · Unsorted: {{ s.unsorted }} · Ошибок: {{ s.errors }}
+    </div>
+    <div class="meta">Интервал: {{ s.poll_interval }} сек</div>
+    {% if s.last_error %}
+    <div class="meta" style="color: var(--danger); margin-top: 0.3rem">{{ s.last_error[:160] }}</div>
+    {% endif %}
+    <div style="margin-top:0.75rem">
+      <button class="btn btn-secondary btn-sm" onclick="testImap('{{ s.config_file }}', this)">🔌 Проверить почту</button>
+      <span class="meta" id="imap-{{ s.config_file }}"></span>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<div class="card" style="margin-top: 1.5rem">
+  <h2>Быстрые действия</h2>
+  <div class="toolbar">
+    <button class="btn btn-primary" onclick="runAll()">▶ Запустить все сейчас</button>
+    <button class="btn btn-secondary" onclick="reloadConfigs()">↻ Перечитать конфиги</button>
+  </div>
+  <div id="action-msg"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function testImap(file, btn) {
+  const el = document.getElementById('imap-' + file);
+  el.textContent = ' проверка...';
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/test-imap', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({file})
+    });
+    const d = await r.json();
+    el.style.color = d.ok ? 'var(--success)' : 'var(--danger)';
+    el.textContent = d.ok
+      ? (' ✓ ' + d.message + (d.folders_count != null ? ' ('+d.folders_count+' папок)' : ''))
+      : (' ✗ ' + d.message);
+  } catch(e) {
+    el.style.color = 'var(--danger)';
+    el.textContent = ' ✗ ' + e;
+  }
+  btn.disabled = false;
+}
+async function runAll() {
+  const r = await fetch('/api/run', { method: 'POST' });
+  const d = await r.json();
+  document.getElementById('action-msg').innerHTML =
+    '<div class="alert alert-success">Запуск: ' + JSON.stringify(d) + '</div>';
+  setTimeout(() => location.reload(), 2000);
+}
+async function reloadConfigs() {
+  const r = await fetch('/api/reload', { method: 'POST' });
+  const d = await r.json();
+  document.getElementById('action-msg').innerHTML =
+    '<div class="alert alert-success">' + d.message + '</div>';
+  setTimeout(() => location.reload(), 1000);
+}
+</script>
+{% endblock %}

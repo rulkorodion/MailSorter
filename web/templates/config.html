@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% set active = "config" %}
+{% block title %}Конфигурация — Mail Sorter{% endblock %}
+
+{% block content %}
+<h1>Конфигурация</h1>
+<p class="subtitle">Редактирование YAML-файлов ящиков. Изменения применяются без перезапуска.</p>
+
+<div class="help-block">
+  <strong>Как это работает:</strong> каждый файл в папке <code>configs/</code> — отдельный почтовый ящик.
+  После сохранения конфиг автоматически перечитывается. Обязательные секции: <code>name</code>, <code>imap</code>, <code>llm</code>, <code>rules</code>.
+  Секреты скрыты как <code>&lt;REDACTED&gt;</code> при просмотре. Не меняйте этот маркер, если хотите сохранить текущее значение. Для нового секрета используйте <code>ENV:ИМЯ_ПЕРЕМЕННОЙ</code>.
+</div>
+
+<div class="card">
+  <div class="toolbar">
+    <select id="file-select" onchange="loadFile()">
+      {% for f in files %}
+      <option value="{{ f }}" {% if f == current %}selected{% endif %}>{{ f }}</option>
+      {% endfor %}
+    </select>
+    <button class="btn btn-primary" onclick="saveConfig()">💾 Сохранить</button>
+    <button class="btn btn-secondary" onclick="validateConfig()">✓ Проверить</button>
+    <button class="btn btn-secondary" onclick="newConfig()">+ Новый</button>
+    <button class="btn btn-danger btn-sm" onclick="deleteConfig()">Удалить</button>
+  </div>
+
+  <div id="msg"></div>
+
+  <textarea id="editor" spellcheck="false">{{ content }}</textarea>
+
+  <div class="help-block" style="margin-top: 1rem">
+    <strong>Пояснения к полям:</strong><br>
+    <code>imap.host / port</code> — адрес и порт IMAP-сервера (обычно 993)<br>
+    <code>imap.username / password</code> — логин и пароль (или ENV:VAR)<br>
+    <code>imap.inbox_folder</code> — папка входящих (обычно INBOX)<br>
+    <code>imap.unsorted_folder</code> — куда складывать письма с низкой уверенностью / ошибками<br>
+    <code>imap.poll_interval_seconds</code> — как часто опрашивать ящик (мин. 10)<br>
+    <code>llm.endpoint</code> — адрес Ollama (по умолчанию http://localhost:11434)<br>
+    <code>llm.model</code> — имя модели<br>
+    <code>llm.system_prompt</code> — системный промпт; плейсхолдер {categories} подставится автоматически<br>
+    <code>rules.confidence_threshold</code> — порог уверенности (0–1)<br>
+    <code>rules.categories</code> — список {name, folder}<br>
+    <code>web.admin_username / admin_password</code> — логин/пароль веб-интерфейса<br>
+    <code>logging.*</code> — уровень, файл, ротация
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function showMsg(text, ok) {
+  document.getElementById('msg').innerHTML =
+    '<div class="alert alert-' + (ok ? 'success' : 'error') + '">' + text + '</div>';
+}
+
+async function loadFile() {
+  const f = document.getElementById('file-select').value;
+  if (!f) return;
+  const r = await fetch('/api/config/' + encodeURIComponent(f));
+  const d = await r.json();
+  document.getElementById('editor').value = d.content || '';
+  history.replaceState(null, '', '/config?file=' + encodeURIComponent(f));
+}
+
+async function saveConfig() {
+  const f = document.getElementById('file-select').value;
+  if (!f) { showMsg('Выберите файл', false); return; }
+  const content = document.getElementById('editor').value;
+  const r = await fetch('/api/config/' + encodeURIComponent(f), {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({content})
+  });
+  const d = await r.json();
+  showMsg(d.message || d.error, d.ok !== false && r.ok);
+}
+
+async function validateConfig() {
+  const content = document.getElementById('editor').value;
+  const r = await fetch('/api/validate', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({content})
+  });
+  const d = await r.json();
+  showMsg(d.message, d.ok);
+}
+
+async function newConfig() {
+  const name = prompt('Имя файла (например work.yaml):');
+  if (!name) return;
+  const content = document.getElementById('editor').value ||
+    '# Новый конфиг\nname: "Новый ящик"\n';
+  const r = await fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({filename: name, content})
+  });
+  const d = await r.json();
+  if (d.ok) {
+    showMsg('Создан: ' + d.filename, true);
+    setTimeout(() => location.href = '/config?file=' + encodeURIComponent(d.filename), 800);
+  } else {
+    showMsg(d.error, false);
+  }
+}
+
+async function deleteConfig() {
+  const f = document.getElementById('file-select').value;
+  if (!f || !confirm('Удалить ' + f + '?')) return;
+  await fetch('/api/config/' + encodeURIComponent(f), {method: 'DELETE'});
+  location.href = '/config';
+}
+</script>
+{% endblock %}

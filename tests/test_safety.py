@@ -121,14 +121,18 @@ class SorterTests(unittest.TestCase):
 class ImapTlsTests(unittest.TestCase):
     def test_certificate_error_never_reconnects_without_verification(self):
         cfg = ImapConfig(host="example.invalid", username="fake", password="unused")
-        fake_socket = SimpleNamespace(close=lambda: None)
-        with patch("mailsorter.imap_client.socket.create_connection", return_value=fake_socket), \
-             patch("mailsorter.imap_client.MailBox", side_effect=ssl.SSLCertVerificationError("fake certificate")) as mailbox:
+        addresses = [(2, 1, 6, "", ("192.0.2.1", 993)),
+                     (2, 1, 6, "", ("192.0.2.2", 993))]
+        with patch("mailsorter.imap_client.socket.getaddrinfo", return_value=addresses), \
+             patch("mailsorter.imap_client._open_tls_socket",
+                   side_effect=ssl.SSLCertVerificationError("fake certificate")) as tls:
             with self.assertRaisesRegex(RuntimeError, "TLS"):
                 ImapClient(cfg).connect()
-        self.assertEqual(mailbox.call_count, 1)
+        self.assertEqual(tls.call_count, 1)
         self.assertTrue(cfg.ssl_verify)
-        self.assertEqual(mailbox.call_args.kwargs["ssl_context"].verify_mode, ssl.CERT_REQUIRED)
+        context = tls.call_args.args[5]
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
 
     def test_fetch_uses_peek_without_marking_seen(self):
         client = ImapClient(ImapConfig(host="example.invalid", username="fake", password="unused"))

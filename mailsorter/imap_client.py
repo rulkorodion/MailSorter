@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import imaplib
 import logging
 import re
 import socket
 import ssl
+import time
 from typing import Any
 
 from imap_tools import MailBox, MailMessage
@@ -15,19 +17,66 @@ from .config import ImapConfig
 logger = logging.getLogger("mailsorter.imap")
 
 
-def _make_ssl_context(verify: bool) -> ssl.SSLContext:
-    if verify:
-        ctx = ssl.create_default_context()
-    else:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+MAX_DNS_ADDRESSES = 8
+MAX_ADDRESS_SECONDS = 10
+
+
+def _make_ssl_context() -> ssl.SSLContext:
+    ctx = ssl.create_default_context()
     # Более совместимый набор для старых Exchange/корпоративных серверов
     try:
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     except Exception:
         pass
     return ctx
+
+
+def _open_tls_socket(
+    address: tuple, family: int, socktype: int, proto: int,
+    host: str, context: ssl.SSLContext, timeout: float,
+) -> ssl.SSLSocket:
+    """Connect to one resolved IP, verifying the original DNS name."""
+    raw = socket.socket(family, socktype, proto)
+    raw.settimeout(timeout)
+    try:
+        raw.connect(address)
+        return context.wrap_socket(raw, server_hostname=host)
+    except Exception:
+        raw.close()
+        raise
+
+
+class _PreconnectedIMAP4SSL(imaplib.IMAP4_SSL):
+    """Let imaplib consume an existing TLS socket without resolving DNS again."""
+
+    def __init__(self, host: str, port: int, tls_socket: ssl.SSLSocket,
+                 context: ssl.SSLContext, timeout: float):
+        self._provided_socket = tls_socket
+        try:
+            super().__init__(host, port, ssl_context=context, timeout=timeout)
+        except Exception:
+            tls_socket.close()
+            raise
+
+    def _create_socket(self, timeout: float) -> ssl.SSLSocket:
+        sock = self._provided_socket
+        self._provided_socket = None
+        return sock
+
+
+class _PreconnectedMailBox(MailBox):
+    """imap-tools adapter preserving its login/folder interface."""
+
+    def __init__(self, host: str, port: int, tls_socket: ssl.SSLSocket,
+                 context: ssl.SSLContext, timeout: float):
+        self._provided_socket = tls_socket
+        super().__init__(host, port=port, timeout=timeout, ssl_context=context)
+
+    def _get_mailbox_client(self) -> imaplib.IMAP4_SSL:
+        return _PreconnectedIMAP4SSL(
+            self._host, self._port, self._provided_socket,
+            self._ssl_context, self._timeout,
+        )
 
 
 class ImapClient:
@@ -49,42 +98,91 @@ class ImapClient:
         host = self.cfg.host.strip()
         port = int(self.cfg.port)
         timeout = int(getattr(self.cfg, "timeout_seconds", 30) or 30)
-        verify = self.cfg.ssl_verify
-        if not verify:
-            logger.warning("Проверка TLS-сертификата IMAP явно отключена для %s", host)
+        if not self.cfg.ssl_verify:
+            raise RuntimeError("IMAP TLS: проверка сертификата обязательна")
         username = self.cfg.username.strip()
 
         logger.info(
-            "IMAP connect: host=%s port=%s user=%s ssl_verify=%s timeout=%s",
-            host, port, username, verify, timeout,
+            "IMAP connect: host=%s port=%s ssl_verify=true timeout=%s",
+            host, port, timeout,
         )
 
-        # --- Этап 1: TCP ---
+        context = _make_ssl_context()
+        deadline = time.monotonic() + timeout
         try:
-            sock = socket.create_connection((host, port), timeout=timeout)
-            sock.close()
-            logger.debug("TCP %s:%s OK", host, port)
-        except OSError as e:
-            raise RuntimeError(
-                f"TCP до {host}:{port} недоступен: {e}. "
-                f"Проверьте хост, порт, файрвол и что с этой машины есть маршрут до сервера."
-            ) from e
+            resolved = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except OSError as exc:
+            logger.warning("IMAP DNS %s failed: %s", host, type(exc).__name__)
+            raise RuntimeError("Не удалось разрешить DNS-имя IMAP-сервера") from None
 
-        # --- Этап 2: SSL + IMAP LOGIN через imap-tools ---
-        ssl_context = _make_ssl_context(verify)
-        try:
-            self._mailbox = MailBox(
-                host,
-                port=port,
-                timeout=timeout,
-                ssl_context=ssl_context,
-            )
-            self._mailbox.login(username, password)
-        except Exception as e:
-            self.disconnect()
-            if isinstance(e, (ssl.SSLError, ssl.CertificateError)) or "certificate" in str(e).lower():
+        candidates = []
+        seen = set()
+        for family, socktype, proto, _canonname, address in resolved:
+            key = (family, socktype, proto, address)
+            if key not in seen:
+                seen.add(key)
+                candidates.append((family, socktype, proto, address))
+            if len(candidates) >= MAX_DNS_ADDRESSES:
+                break
+        if not candidates:
+            raise RuntimeError("DNS не вернул адресов IMAP-сервера")
+
+        last_error = "нет ответа"
+        for family, socktype, proto, address in candidates:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            attempt_timeout = min(remaining, MAX_ADDRESS_SECONDS)
+            ip = address[0]
+            logger.info("IMAP TLS attempt: ip=%s port=%s", ip, port)
+            try:
+                tls_socket = _open_tls_socket(
+                    address, family, socktype, proto, host, context, attempt_timeout,
+                )
+            except (ssl.SSLCertVerificationError, ssl.CertificateError):
+                logger.error("IMAP TLS certificate verification failed: ip=%s", ip)
                 raise RuntimeError("Ошибка проверки TLS-сертификата IMAP") from None
-            raise RuntimeError(f"Не удалось подключиться к IMAP ({type(e).__name__})") from None
+            except (OSError, ssl.SSLError) as exc:
+                last_error = type(exc).__name__
+                logger.warning("IMAP TLS attempt failed: ip=%s reason=%s", ip, last_error)
+                continue
+
+            try:
+                mailbox = _PreconnectedMailBox(
+                    host, port, tls_socket, context, attempt_timeout,
+                )
+            except (ssl.SSLCertVerificationError, ssl.CertificateError):
+                tls_socket.close()
+                logger.error("IMAP TLS certificate verification failed: ip=%s", ip)
+                raise RuntimeError("Ошибка проверки TLS-сертификата IMAP") from None
+            except (OSError, ssl.SSLError, imaplib.IMAP4.error) as exc:
+                tls_socket.close()
+                last_error = type(exc).__name__
+                logger.warning("IMAP greeting failed: ip=%s reason=%s", ip, last_error)
+                continue
+            except Exception:
+                tls_socket.close()
+                raise
+
+            try:
+                mailbox.login(username, password)
+            except Exception as exc:
+                # Do not retry another IP after credentials have been sent.
+                try:
+                    mailbox.client.shutdown()
+                except Exception:
+                    tls_socket.close()
+                logger.warning("IMAP login failed: ip=%s reason=%s", ip, type(exc).__name__)
+                raise RuntimeError(f"Ошибка IMAP-аутентификации ({type(exc).__name__})") from None
+
+            tls_socket.settimeout(timeout)
+            self._mailbox = mailbox
+            logger.info("IMAP TLS connected: ip=%s host=%s", ip, host)
+            break
+        else:
+            raise RuntimeError(f"IMAP TLS недоступен по DNS-адресам ({last_error})")
+        if self._mailbox is None:
+            raise RuntimeError(f"Превышено время подключения к IMAP ({last_error})")
 
         # --- Этап 3: папки и INBOX ---
         try:
@@ -105,6 +203,7 @@ class ImapClient:
         inbox = self._resolve_folder_name(self.cfg.inbox_folder, folders)
         if not inbox:
             available = ", ".join(folders[:30]) or "(пусто)"
+            self.disconnect()
             raise RuntimeError(
                 f"Папка входящих «{self.cfg.inbox_folder}» не найдена. Доступные: {available}"
             )
@@ -115,6 +214,7 @@ class ImapClient:
             self._mailbox.folder.set(self.cfg.inbox_folder)
         except Exception as e:
             available = ", ".join(folders[:30]) or "(пусто)"
+            self.disconnect()
             raise RuntimeError(
                 f"Не удалось открыть «{self.cfg.inbox_folder}»: {e}. Доступные: {available}"
             ) from e

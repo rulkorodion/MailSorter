@@ -22,6 +22,7 @@ class RunStats:
     processed: int = 0
     moved: int = 0
     unsorted: int = 0
+    planned_unsorted: int = 0
     errors: int = 0
     planned: int = 0
     mode: str = "dry_run"
@@ -130,6 +131,8 @@ class MailSorter:
                             detail["reason"] = "low_confidence"
                         if mode == "dry_run":
                             self.stats.planned += 1
+                            if destination == unsorted:
+                                self.stats.planned_unsorted += 1
                             detail["action"] = "planned"
                         else:
                             imap.move_message(msg, destination)
@@ -148,9 +151,9 @@ class MailSorter:
             self.stats.status = "done"
             self.stats.finished_at = datetime.now()
             logger.info(
-                "[%s] Готово: processed=%d planned=%d moved=%d unsorted=%d errors=%d",
+                "[%s] Готово: processed=%d planned=%d planned_unsorted=%d moved=%d unsorted=%d errors=%d",
                 self.name, self.stats.processed, self.stats.planned,
-                self.stats.moved, self.stats.unsorted, self.stats.errors,
+                self.stats.planned_unsorted, self.stats.moved, self.stats.unsorted, self.stats.errors,
             )
         except Exception as e:
             self.stats.status = "error"

@@ -287,6 +287,7 @@ async def page_test(request: Request, user: str = Depends(verify_auth)):
     return templates.TemplateResponse(
         request, "test.html",
         {"files": [p.name for p in list_config_files()], "user": user},
+        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -658,7 +659,13 @@ async def api_test(request: Request, user: str = Depends(verify_auth)):
                 body.get("sender", "test@example.com"),
                 body.get("text", ""),
             )
-        _, _, result["folder"] = resolve_destination(result, cfg)
+        category, _, result["folder"] = resolve_destination(result, cfg)
+        if category == "":
+            result["assignment_reason"] = "Модель не выбрала категорию; запланирована резервная папка из конфигурации."
+        elif result["folder"] != category:
+            result["assignment_reason"] = "Уверенность ниже порога; запланирована резервная папка из конфигурации."
+        else:
+            result["assignment_reason"] = "Папка выбрана по правилу классификации."
         result["action"] = "planned"
         return {"ok": True, "provider": cfg.llm.provider, "model": cfg.llm.model, "result": result}
     except Exception as e:

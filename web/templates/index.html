@@ -20,7 +20,7 @@
       <span class="badge badge-{{ s.status }}">{{ s.status }}</span>
     </div>
     <div class="meta">
-      Обработано: {{ s.processed }} · Запланировано: {{ s.planned }} · Перемещено: {{ s.moved }} · Unsorted: {{ s.unsorted }} · Ошибок: {{ s.errors }}
+      Обработано: {{ s.processed }} · Запланировано: {{ s.planned }} · В Unsorted запланировано: {{ s.planned_unsorted }} · Перемещено по правилам: {{ s.moved }} · В Unsorted перемещено: {{ s.unsorted }} · Ошибок: {{ s.errors }}
     </div>
     <div class="meta">Интервал: {{ s.poll_interval }} сек</div>
     {% if s.last_error %}

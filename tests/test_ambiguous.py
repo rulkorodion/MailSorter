@@ -5,12 +5,15 @@ from __future__ import annotations
 import base64
 import json
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from mailsorter.config import LlmConfig, MailboxConfig, build_system_prompt
 from mailsorter.llm_client import LlmClient, LlmError
+from mailsorter.manager import SorterManager
 from mailsorter.sorter import MailSorter, resolve_destination
 from mailsorter.webapp import app
 from tests.test_safety import FakeImap
@@ -78,6 +81,7 @@ class AmbiguousDecisionTests(unittest.TestCase):
                     stats = MailSorter(cfg).run_once()
                 fake = FakeImap.instances[-1]
                 self.assertEqual((stats.mode, stats.planned, stats.errors), ("dry_run", 1, 0))
+                self.assertEqual((stats.planned_unsorted, stats.unsorted, stats.moved), (1, 0, 0))
                 self.assertEqual(stats.details[0]["action"], "planned")
                 self.assertEqual(stats.details[0]["folder"], "INBOX/NeedsReview")
                 self.assertEqual(stats.details[0]["decision"], "no_matching_category")
@@ -88,7 +92,37 @@ class AmbiguousDecisionTests(unittest.TestCase):
     def test_valid_refusal_routes_to_configured_unsorted_in_fake_active_mode(self):
         stats = MailSorter(mailbox_config()).run_once(mode="active")
         self.assertEqual(FakeImap.instances[-1].moves, [("101", "INBOX/NeedsReview")])
-        self.assertEqual((stats.unsorted, stats.moved, stats.errors), (1, 0, 0))
+        self.assertEqual((stats.unsorted, stats.planned_unsorted, stats.moved, stats.errors), (1, 0, 0, 0))
+
+    def test_low_confidence_also_counts_as_planned_unsorted(self):
+        ParsedFakeLlm.raw = json.dumps({"category": "INBOX/Work", "confidence": 0.1,
+                                        "reason": "Слабое совпадение"})
+        stats = MailSorter(mailbox_config()).run_once()
+        self.assertEqual((stats.planned, stats.planned_unsorted, stats.unsorted), (1, 1, 0))
+        self.assertEqual(FakeImap.instances[-1].moves, [])
+
+    def test_six_synthetic_messages_plan_one_unsorted_and_move_none(self):
+        messages = [SimpleNamespace(uid=str(uid), subject="Рабочая заявка", from_="sender@example.invalid")
+                    for uid in range(25, 30)]
+        messages.append(SimpleNamespace(uid="30", subject="Нужна помощь", from_="sender@example.invalid"))
+
+        class SubjectLlm(ParsedFakeLlm):
+            def classify(self, subject, sender, body):
+                raw = (REFUSAL if subject == "Нужна помощь" else
+                       json.dumps({"category": "INBOX/Work", "confidence": 0.95,
+                                   "reason": "Рабочая заявка"}))
+                with LlmClient(self.cfg) as parser:
+                    return parser._parse_json(raw)
+
+        with patch.object(FakeImap, "fetch_folder_messages", return_value=messages), \
+             patch("mailsorter.sorter.LlmClient", SubjectLlm):
+            stats = MailSorter(mailbox_config()).run_once()
+        self.assertEqual((stats.processed, stats.planned, stats.planned_unsorted), (6, 6, 1))
+        self.assertEqual((stats.moved, stats.unsorted, stats.errors), (0, 0, 0))
+        self.assertEqual(stats.details[-1]["uid"], "30")
+        self.assertEqual(stats.details[-1]["folder"], "INBOX/NeedsReview")
+        self.assertEqual(FakeImap.instances[-1].moves, [])
+        self.assertEqual(FakeImap.instances[-1].creates, [])
 
     def test_technical_llm_failure_retries_next_run_without_move(self):
         ParsedFakeLlm.failure = LlmError("synthetic timeout")
@@ -150,6 +184,34 @@ class AbstentionParsingTests(unittest.TestCase):
 
 
 class AmbiguousWebTests(unittest.TestCase):
+    def test_status_and_pages_keep_planned_and_actual_unsorted_separate(self):
+        cfg = mailbox_config()
+        sorter = MailSorter(cfg)
+        sorter.stats.planned = 1
+        sorter.stats.planned_unsorted = 1
+        sorter.stats.unsorted = 0
+        manager = SorterManager()
+        manager.sorters["synthetic.yaml"] = sorter
+        status = manager.get_status()[0]
+        self.assertEqual((status["planned_unsorted"], status["unsorted"]), (1, 0))
+
+        auth = base64.b64encode(b"admin:offline-password").decode()
+        with patch("mailsorter.webapp.is_setup_mode", return_value=False), \
+             patch("mailsorter.webapp._load_web_credentials", return_value=True), \
+             patch("mailsorter.webapp._web_user", "admin"), \
+             patch("mailsorter.webapp._web_pass", "offline-password"), \
+             patch("mailsorter.webapp.manager.get_status", return_value=[status]):
+            client = TestClient(app)
+            headers = {"Authorization": f"Basic {auth}"}
+            overview = client.get("/", headers=headers)
+            run = client.get("/run", headers=headers)
+        self.assertEqual((overview.status_code, run.status_code), (200, 200))
+        self.assertIn("В Unsorted запланировано: 1", overview.text)
+        self.assertIn("В Unsorted перемещено: 0", overview.text)
+        self.assertRegex(run.text, r"В Unsorted запланировано:\s*<strong>1</strong>")
+        self.assertRegex(run.text, r"В Unsorted перемещено:\s*<strong>0</strong>")
+        self.assertIn("s.planned_unsorted", run.text)
+
     def test_manual_test_shows_planned_configured_folder_without_imap(self):
         cfg = mailbox_config()
         auth = base64.b64encode(b"admin:offline-password").decode()
@@ -173,15 +235,27 @@ class AmbiguousWebTests(unittest.TestCase):
              patch("mailsorter.webapp._load_web_credentials", return_value=True), \
              patch("mailsorter.webapp._web_user", "admin"), \
              patch("mailsorter.webapp._web_pass", "offline-password"), \
+             patch("mailsorter.webapp.list_config_files", return_value=[Path("synthetic.yaml")]), \
              patch("mailsorter.webapp.load_mailbox_config", return_value=cfg), \
              patch("mailsorter.webapp.LlmClient", FakeWebLlm), \
              patch("mailsorter.webapp.ImapClient") as imap:
-            response = TestClient(app).post("/api/test", headers={"Authorization": f"Basic {auth}"},
-                                            json={"file": "synthetic.yaml", "subject": "Нужна помощь",
-                                                  "text": "Помогите разобраться"})
+            client = TestClient(app)
+            headers = {"Authorization": f"Basic {auth}"}
+            response = client.post("/api/test", headers=headers,
+                                   json={"file": "synthetic.yaml", "subject": "Нужна помощь",
+                                         "text": "Помогите разобраться"})
+            page = client.get("/test", headers=headers)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["result"]["folder"], "INBOX/NeedsReview")
         self.assertEqual(response.json()["result"]["action"], "planned")
+        self.assertEqual(response.json()["result"]["category"], "")
+        self.assertIn("резервная папка из конфигурации", response.json()["result"]["assignment_reason"])
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(page.headers["Cache-Control"], "no-store")
+        self.assertIn("Планируемая папка:", page.text)
+        self.assertIn("d.result.folder", page.text)
+        self.assertIn("Почему эта папка:", page.text)
+        self.assertIn("d.result.assignment_reason", page.text)
         imap.assert_not_called()
 
 

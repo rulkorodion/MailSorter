@@ -30,9 +30,10 @@
   <div class="meta">файл: {{ s.config_file }} · интервал: {{ s.poll_interval }} сек</div>
   <div style="margin: 0.75rem 0" id="stats-{{ s.config_file }}">
     Обработано: <strong>{{ s.processed }}</strong> ·
-    Перемещено: <strong>{{ s.moved }}</strong> ·
+    Перемещено по правилам: <strong>{{ s.moved }}</strong> ·
     Запланировано: <strong>{{ s.planned }}</strong> ·
-    Unsorted: <strong>{{ s.unsorted }}</strong> ·
+    В Unsorted запланировано: <strong>{{ s.planned_unsorted }}</strong> ·
+    В Unsorted перемещено: <strong>{{ s.unsorted }}</strong> ·
     Ошибок: <strong>{{ s.errors }}</strong>
   </div>
   <button class="btn btn-secondary btn-sm" onclick="runOne('{{ s.config_file }}')">
@@ -94,9 +95,10 @@ async function refresh() {
       if (stats) {
         stats.innerHTML =
           'Обработано: <strong>' + s.processed + '</strong> · ' +
-          'Перемещено: <strong>' + s.moved + '</strong> · ' +
+          'Перемещено по правилам: <strong>' + s.moved + '</strong> · ' +
           'Запланировано: <strong>' + s.planned + '</strong> · ' +
-          'Unsorted: <strong>' + s.unsorted + '</strong> · ' +
+          'В Unsorted запланировано: <strong>' + s.planned_unsorted + '</strong> · ' +
+          'В Unsorted перемещено: <strong>' + s.unsorted + '</strong> · ' +
           'Ошибок: <strong>' + s.errors + '</strong>';
       }
       if (mode) {

@@ -164,6 +164,7 @@ class SorterManager:
                 "processed": stats.processed,
                 "moved": stats.moved,
                 "unsorted": stats.unsorted,
+                "planned_unsorted": stats.planned_unsorted,
                 "errors": stats.errors,
                 "planned": stats.planned,
                 "mode": self.mode_for(fname),

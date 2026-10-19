@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import imaplib
 import logging
+import os
 import re
 import secrets
 import socket
@@ -24,6 +25,44 @@ logger = logging.getLogger("mailsorter.imap")
 
 MAX_DNS_ADDRESSES = 8
 MAX_ADDRESS_SECONDS = 10
+_TAG_STATUS_SHAPE = re.compile(rb"^[!-~]+ (?:OK|NO|BAD)(?: |$)", re.ASCII)
+_NUMERIC_UNTAGGED_SHAPE = re.compile(rb"^\* [0-9]+ [A-Z-]+(?: |$)", re.ASCII)
+
+
+def _response_shape(line: bytes, tag_pattern: Any, pending_tag: bytes | None) -> dict[str, str | int | bool]:
+    """Classify an IMAP line without retaining/logging its bytes or text."""
+    if not line:
+        kind = "empty"
+    elif line.startswith(b"*"):
+        kind = "untagged_candidate"
+    elif line.startswith(b"+"):
+        kind = "continuation_candidate"
+    elif line[:1] in (b" ", b"\t"):
+        kind = "leading_whitespace"
+    elif 33 <= line[0] <= 126:
+        kind = "tag_candidate"
+    else:
+        kind = "other"
+    marker_spaces = (len(line[1:]) - len(line[1:].lstrip(b" "))
+                     if line[:1] in (b"*", b"+") else 0)
+    return {
+        "length": len(line),
+        "kind": kind,
+        "marker_spaces": min(marker_spaces, 3),
+        "parser_tag_match": bool(tag_pattern.match(line)),
+        "current_tag_prefix": bool(pending_tag and line.startswith(pending_tag + b" ")),
+        "tag_status_shape": bool(_TAG_STATUS_SHAPE.match(line)),
+        "tag_status_casefold_shape": bool(_TAG_STATUS_SHAPE.match(line.upper())),
+        "parser_untagged_match": bool(imaplib.Untagged_response.match(line)),
+        "parser_numeric_match": bool(imaplib.Untagged_status.match(line)),
+        "numeric_casefold_shape": bool(_NUMERIC_UNTAGGED_SHAPE.match(line.upper())),
+        "parser_continuation_match": bool(imaplib.Continuation.match(line)),
+        "non_ascii": any(byte >= 128 for byte in line),
+        "nul": b"\x00" in line,
+        "embedded_cr": b"\r" in line,
+        "tab": b"\t" in line,
+        "other_control": any(byte < 32 and byte not in (9, 13) for byte in line),
+    }
 
 
 def destination_path(folder: str, layout: str, inbox: str, delimiter: str) -> str:
@@ -168,6 +207,8 @@ class _PreconnectedIMAP4SSL(imaplib.IMAP4_SSL):
                  context: ssl.SSLContext, timeout: float):
         self._provided_socket = tls_socket
         self.last_operation_trace: _CommandTrace | None = None
+        self._move_response_diagnostics = os.environ.get("MAILSORTER_IMAP_MOVE_DIAGNOSTICS") == "1"
+        self.last_response_shape: dict[str, str | int | bool] | None = None
         try:
             super().__init__(host, port, ssl_context=context, timeout=timeout)
         except Exception:
@@ -179,12 +220,21 @@ class _PreconnectedIMAP4SSL(imaplib.IMAP4_SSL):
         self._provided_socket = None
         return sock
 
+    def _get_line(self) -> bytes:
+        line = super()._get_line()
+        trace = self.last_operation_trace
+        if (self._move_response_diagnostics and trace is not None
+                and trace.operation == "MOVE" and trace.phase == "await_tagged_response"):
+            self.last_response_shape = _response_shape(line, self.tagre, trace.tag)
+        return line
+
     def _command(self, name: str, *args: Any) -> bytes:
         operation = str(args[0]).upper() if name == "UID" and args else ""
         trace = None
         if operation in {"MOVE", "COPY", "STORE", "EXPUNGE"}:
             trace = _CommandTrace(operation)
             self.last_operation_trace = trace
+            self.last_response_shape = None
         try:
             tag = super()._command(name, *args)
         except Exception:
@@ -565,6 +615,11 @@ class ImapClient:
                 uid, actual, source, self._selected_uidvalidity, method, operation, phase,
                 tagged_status or "none", state, socket_state, self._session_id, error_type, diagnostic_code,
             )
+            if (diagnostic_code == "unexpected_response"
+                    and isinstance(self.mailbox.client, _PreconnectedIMAP4SSL)
+                    and self.mailbox.client.last_response_shape is not None):
+                logger.warning("IMAP stage=move_response_shape uid=%s target=%s session=%s shape=%s",
+                               uid, actual, self._session_id, self.mailbox.client.last_response_shape)
             # A tagged OK for this exact UID MOVE (or final UID EXPUNGE after
             # confirmed COPY and STORE) is server evidence, even if imaplib
             # raises on a later BYE/connection issue.

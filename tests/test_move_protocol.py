@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import imaplib
+import os
 import ssl
 import unittest
 from collections import deque
@@ -120,6 +121,73 @@ class TaggedMoveProtocolTests(unittest.TestCase):
             client.uid("MOVE", "30", encode_folder("INBOX/Доступы"))
         self.assertEqual(client.last_operation_trace.phase, "submission_unknown")
         self.assertIsNone(client.last_operation_trace.tagged_status)
+
+
+class ResponseShapeDiagnosticsTests(unittest.TestCase):
+    def test_standard_expunge_during_move_is_accepted_with_diagnostics_on(self):
+        with patch.dict(os.environ, {"MAILSORTER_IMAP_MOVE_DIAGNOSTICS": "1"}):
+            client, _ = scripted_client(
+                lambda tag: [b"* 1 EXPUNGE\r\n", tag + b" OK MOVE completed\r\n"]
+            )
+            result = client.uid("MOVE", "74", encode_folder("INBOX/Сеть и VPN"))
+        self.assertEqual(result[0], "OK")
+        self.assertEqual(client.last_operation_trace.tagged_status, "OK")
+
+    def test_diagnostics_are_off_by_default_even_for_unexpected_response(self):
+        with patch.dict(os.environ, {"MAILSORTER_IMAP_MOVE_DIAGNOSTICS": "0"}):
+            client, _ = scripted_client(lambda _tag: [b"*  1 EXPUNGE\r\n"])
+            with self.assertRaises(imaplib.IMAP4.abort):
+                client.uid("MOVE", "74", encode_folder("INBOX/Сеть и VPN"))
+        self.assertIsNone(client.last_response_shape)
+        self.assertEqual(client.last_operation_trace.phase, "await_tagged_response")
+
+    def test_opt_in_classifies_malformed_untagged_line_without_raw_data(self):
+        with patch.dict(os.environ, {"MAILSORTER_IMAP_MOVE_DIAGNOSTICS": "1"}):
+            client, _ = scripted_client(lambda _tag: [b"*  1 EXPUNGE PRIVATE-SYNTHETIC\r\n"])
+            with self.assertRaises(imaplib.IMAP4.abort):
+                client.uid("MOVE", "74", encode_folder("INBOX/Сеть и VPN"))
+        shape = client.last_response_shape
+        self.assertEqual(shape["kind"], "untagged_candidate")
+        self.assertEqual(shape["marker_spaces"], 2)
+        self.assertFalse(shape["parser_untagged_match"])
+        self.assertFalse(shape["parser_numeric_match"])
+        self.assertEqual(shape["length"], len(b"*  1 EXPUNGE PRIVATE-SYNTHETIC"))
+        self.assertNotIn("PRIVATE", str(shape))
+
+    def test_opt_in_distinguishes_foreign_tag_from_current_tag(self):
+        with patch.dict(os.environ, {"MAILSORTER_IMAP_MOVE_DIAGNOSTICS": "1"}):
+            client, _ = scripted_client(lambda _tag: [b"FOREIGN123 OK synthetic\r\n"])
+            with self.assertRaises(imaplib.IMAP4.abort):
+                client.uid("MOVE", "74", encode_folder("INBOX/Сеть и VPN"))
+        shape = client.last_response_shape
+        self.assertEqual(shape["kind"], "tag_candidate")
+        self.assertTrue(shape["tag_status_shape"])
+        self.assertFalse(shape["current_tag_prefix"])
+        self.assertFalse(shape["parser_tag_match"])
+
+    def test_shape_is_logged_only_on_opted_in_move_parse_error(self):
+        with patch.dict(os.environ, {"MAILSORTER_IMAP_MOVE_DIAGNOSTICS": "1"}):
+            stream = ScriptedTlsSocket(lambda _tag: [b"*  1 EXPUNGE PRIVATE-SYNTHETIC\r\n"])
+            mailbox = _PreconnectedMailBox("mail.example.invalid", 993, stream,
+                                           ssl.create_default_context(), 2)
+        mailbox.client.state = "SELECTED"
+        mailbox.folder.status = MagicMock(return_value={"UIDVALIDITY": 11, "UIDNEXT": 200})
+        imap = ImapClient(folder_config().imap)
+        imap._mailbox = mailbox
+        imap._selected_folder = "INBOX"
+        imap._selected_uidvalidity = 7
+        with patch.object(imap, "ensure_folder", return_value="INBOX/Сеть и VPN"), \
+             patch.object(imap, "_verify_move", return_value=True) as verify, \
+             self.assertLogs("mailsorter.imap", level="WARNING") as logs:
+            result = imap.move_message(message(uid="74"), "INBOX/Сеть и VPN",
+                                       before_command=lambda: None)
+        self.assertEqual(result.evidence, "verified_after_error")
+        verify.assert_called_once()
+        log_text = " ".join(logs.output)
+        self.assertIn("stage=move_response_shape", log_text)
+        self.assertIn("diagnostic_code=unexpected_response", log_text)
+        self.assertNotIn("PRIVATE-SYNTHETIC", log_text)
+        self.assertEqual(len([line for line in stream.sent if b" UID MOVE " in line]), 1)
 
 
 class MoveEvidenceTests(unittest.TestCase):

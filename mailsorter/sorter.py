@@ -167,9 +167,17 @@ class MailSorter:
                                 logger.error("[%s] stage=journal_resolve uid=%s target=%s error_type=%s",
                                              self.name, msg.uid, destination, type(exc).__name__)
                             detail["move_evidence"] = move_result.evidence
+                            detail["confirmation_method"] = (
+                                "server_tagged_ok" if move_result.evidence == "server_ok"
+                                else "independent_imap_verification"
+                            )
                             if move_result.error_type:
-                                detail["stage"] = "verify_move"
+                                detail["stage"] = move_result.stage or "verify_move"
                                 detail["move_warning"] = move_result.error_type
+                            if move_result.phase:
+                                detail["phase"] = move_result.phase
+                            if move_result.diagnostic_code:
+                                detail["diagnostic_code"] = move_result.diagnostic_code
                             if destination == unsorted:
                                 self.stats.unsorted += 1
                                 detail["action"] = "unsorted"
@@ -181,6 +189,10 @@ class MailSorter:
                         self.stats.move_unknown += 1
                         detail.update(action="move_unknown", stage=exc.stage,
                                       reason=exc.error_type)
+                        if exc.phase:
+                            detail["phase"] = exc.phase
+                        if exc.diagnostic_code:
+                            detail["diagnostic_code"] = exc.diagnostic_code
                         logger.error("[%s] stage=%s uid=%s target=%s error_type=%s outcome=unknown",
                                      self.name, exc.stage, msg.uid, detail.get("folder"), exc.error_type)
                     except MoveNotStartedError as exc:

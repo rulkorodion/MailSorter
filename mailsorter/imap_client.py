@@ -5,14 +5,17 @@ from __future__ import annotations
 import imaplib
 import logging
 import re
+import secrets
 import socket
 import ssl
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from collections.abc import Callable
 
 from imap_tools import AND, Header, MailBox, MailMessage
+from imap_tools.errors import MailboxCopyError, MailboxDeleteError, MailboxExpungeError
+from imap_tools.utils import check_command_status, encode_folder
 
 from .config import ImapConfig
 
@@ -49,6 +52,17 @@ def destination_path(folder: str, layout: str, inbox: str, delimiter: str) -> st
 class MoveResult:
     evidence: str  # server_ok or verified_after_error
     error_type: str | None = None
+    stage: str | None = field(default=None, compare=False)
+    diagnostic_code: str | None = field(default=None, compare=False)
+    phase: str | None = field(default=None, compare=False)
+
+
+@dataclass
+class _CommandTrace:
+    operation: str
+    phase: str = "before_submit"
+    tag: bytes | None = None
+    tagged_status: str | None = None
 
 
 class MoveNotStartedError(RuntimeError):
@@ -59,10 +73,47 @@ class MoveNotStartedError(RuntimeError):
 
 
 class MoveUncertainError(RuntimeError):
-    def __init__(self, stage: str, error_type: str):
+    def __init__(self, stage: str, error_type: str, phase: str | None = None,
+                 diagnostic_code: str | None = None):
         self.stage = stage
         self.error_type = error_type
+        self.phase = phase
+        self.diagnostic_code = diagnostic_code
         super().__init__(f"Результат IMAP MOVE не определён: {stage} ({error_type})")
+
+
+def _safe_abort_code(exc: Exception) -> str:
+    """Only emit a fixed category; abort text can contain raw server data."""
+    if not isinstance(exc, imaplib.IMAP4.abort):
+        return "other_error"
+    reason = str(exc).casefold()
+    if "unexpected tagged response" in reason:
+        return "unexpected_tagged_response"
+    if "unexpected response" in reason:
+        return "unexpected_response"
+    if "unterminated line" in reason:
+        return "unterminated_line"
+    if "socket error: eof" in reason:
+        return "socket_eof"
+    if "timed out" in reason or "timeout" in reason:
+        return "timeout"
+    if "socket error" in reason:
+        return "socket_error"
+    if "bye" in reason:
+        return "server_bye"
+    return "imap_abort_other"
+
+
+def _safe_connection_state(client: Any) -> tuple[str, str]:
+    state = getattr(client, "state", None)
+    if state not in {"NONAUTH", "AUTH", "SELECTED", "LOGOUT"}:
+        state = "unknown"
+    sock = getattr(client, "sock", None)
+    try:
+        open_state = "open" if sock is not None and sock.fileno() >= 0 else "closed"
+    except Exception:
+        open_state = "unknown"
+    return state, open_state
 
 
 class ImapAuthenticationError(RuntimeError):
@@ -116,6 +167,7 @@ class _PreconnectedIMAP4SSL(imaplib.IMAP4_SSL):
     def __init__(self, host: str, port: int, tls_socket: ssl.SSLSocket,
                  context: ssl.SSLContext, timeout: float):
         self._provided_socket = tls_socket
+        self.last_operation_trace: _CommandTrace | None = None
         try:
             super().__init__(host, port, ssl_context=context, timeout=timeout)
         except Exception:
@@ -126,6 +178,45 @@ class _PreconnectedIMAP4SSL(imaplib.IMAP4_SSL):
         sock = self._provided_socket
         self._provided_socket = None
         return sock
+
+    def _command(self, name: str, *args: Any) -> bytes:
+        operation = str(args[0]).upper() if name == "UID" and args else ""
+        trace = None
+        if operation in {"MOVE", "COPY", "STORE", "EXPUNGE"}:
+            trace = _CommandTrace(operation)
+            self.last_operation_trace = trace
+        try:
+            tag = super()._command(name, *args)
+        except Exception:
+            if trace is not None:
+                trace.phase = "submission_unknown"
+            raise
+        if trace is not None:
+            trace.tag = tag
+            trace.phase = "await_tagged_response"
+        return tag
+
+    def _get_tagged_response(self, tag: bytes, expect_bye: bool = False) -> tuple:
+        result = super()._get_tagged_response(tag, expect_bye=expect_bye)
+        trace = self.last_operation_trace
+        if trace is not None and trace.tag == tag:
+            trace.tagged_status = result[0]
+            trace.phase = "tagged_response_received"
+        return result
+
+    def _command_complete(self, name: str, tag: bytes) -> tuple:
+        try:
+            result = super()._command_complete(name, tag)
+        except Exception:
+            trace = self.last_operation_trace
+            if trace is not None and trace.tag == tag:
+                trace.phase = ("after_tagged_response" if trace.tagged_status is not None
+                               else "await_tagged_response")
+            raise
+        trace = self.last_operation_trace
+        if trace is not None and trace.tag == tag:
+            trace.phase = "completed"
+        return result
 
 
 class _PreconnectedMailBox(MailBox):
@@ -151,6 +242,7 @@ class ImapClient:
         self._folder_delimiter: str = "/"
         self._selected_folder: str | None = None
         self._selected_uidvalidity: int | None = None
+        self._session_id = secrets.token_hex(4)
 
     @property
     def selected_uidvalidity(self) -> int | None:
@@ -174,8 +266,8 @@ class ImapClient:
         username = self.cfg.username.strip()
 
         logger.info(
-            "IMAP connect: host=%s port=%s ssl_verify=true timeout=%s",
-            host, port, timeout,
+            "IMAP connect: host=%s port=%s ssl_verify=true timeout=%s session=%s",
+            host, port, timeout, self._session_id,
         )
 
         context = _make_ssl_context()
@@ -249,7 +341,7 @@ class ImapClient:
 
             tls_socket.settimeout(timeout)
             self._mailbox = mailbox
-            logger.info("IMAP TLS connected: ip=%s host=%s", ip, host)
+            logger.info("IMAP TLS connected: ip=%s host=%s session=%s", ip, host, self._session_id)
             break
         else:
             raise RuntimeError(f"IMAP TLS недоступен по DNS-адресам ({last_error})")
@@ -297,7 +389,8 @@ class ImapClient:
             try:
                 self._mailbox.logout()
             except Exception as exc:
-                logger.warning("IMAP stage=logout error_type=%s", type(exc).__name__)
+                logger.warning("IMAP stage=logout error_type=%s session=%s",
+                               type(exc).__name__, self._session_id)
                 try:
                     self._mailbox.client.shutdown()
                 except Exception:
@@ -429,7 +522,15 @@ class ImapClient:
             logger.warning("IMAP stage=target_baseline uid=%s target=%s error_type=%s",
                            uid, actual, type(exc).__name__)
 
-        method = "MOVE" if "MOVE" in self.mailbox.client.capabilities else "COPY_STORE_EXPUNGE"
+        capabilities = self.mailbox.client.capabilities
+        if "MOVE" in capabilities:
+            method = "MOVE"
+        elif "UIDPLUS" in capabilities:
+            method = "UIDPLUS_FALLBACK"
+        else:
+            logger.warning("IMAP stage=capability uid=%s source=%s target=%s session=%s reason=safe_move_unavailable",
+                           uid, source, actual, self._session_id)
+            raise MoveNotStartedError("capability", "SafeMoveUnavailable")
         if before_command is not None:
             try:
                 before_command()
@@ -438,13 +539,43 @@ class ImapClient:
                              uid, actual, type(exc).__name__)
                 raise MoveNotStartedError("journal_pending", type(exc).__name__) from exc
 
-        logger.info("IMAP stage=move_command uid=%s target=%s method=%s", uid, actual, method)
+        logger.info("IMAP stage=move_command uid=%s target=%s source=%s source_uidvalidity=%s method=%s session=%s",
+                    uid, actual, source, self._selected_uidvalidity, method, self._session_id)
+        if isinstance(self.mailbox.client, _PreconnectedIMAP4SSL):
+            self.mailbox.client.last_operation_trace = None
         try:
-            self.mailbox.move(uid, actual)
+            if method == "MOVE":
+                self.mailbox.move(uid, actual)
+            else:
+                self._uidplus_move(uid, actual)
         except Exception as exc:
             error_type = type(exc).__name__
-            logger.warning("IMAP stage=move_command uid=%s target=%s method=%s error_type=%s",
-                           uid, actual, method, error_type)
+            diagnostic_code = _safe_abort_code(exc)
+            trace = getattr(self.mailbox.client, "last_operation_trace", None)
+            if not isinstance(trace, _CommandTrace):
+                trace = None
+            phase = trace.phase if trace else "unavailable"
+            tagged_status = trace.tagged_status if trace else None
+            operation = trace.operation if trace else "unknown"
+            state, socket_state = _safe_connection_state(self.mailbox.client)
+            logger.warning(
+                "IMAP stage=move_command uid=%s target=%s source=%s source_uidvalidity=%s method=%s "
+                "operation=%s phase=%s tagged_status=%s connection_state=%s socket_state=%s "
+                "session=%s error_type=%s diagnostic_code=%s",
+                uid, actual, source, self._selected_uidvalidity, method, operation, phase,
+                tagged_status or "none", state, socket_state, self._session_id, error_type, diagnostic_code,
+            )
+            # A tagged OK for this exact UID MOVE (or final UID EXPUNGE after
+            # confirmed COPY and STORE) is server evidence, even if imaplib
+            # raises on a later BYE/connection issue.
+            confirmed_operation = "MOVE" if method == "MOVE" else "EXPUNGE"
+            if (trace is not None and trace.operation == confirmed_operation
+                    and trace.tagged_status == "OK"):
+                logger.warning("IMAP stage=post_tagged_response uid=%s target=%s method=%s "
+                               "session=%s result=server_confirmed diagnostic_code=%s",
+                               uid, actual, method, self._session_id, diagnostic_code)
+                return MoveResult("server_ok", error_type, "post_tagged_response", diagnostic_code,
+                                  phase)
             try:
                 verified = self._verify_move(msg, source, actual, self._selected_uidvalidity, baseline)
             except Exception as verify_exc:
@@ -452,15 +583,29 @@ class ImapClient:
                                uid, actual, type(verify_exc).__name__)
                 verified = False
             if verified:
-                logger.warning("IMAP stage=verify_move uid=%s target=%s result=confirmed error_type=%s",
-                               uid, actual, error_type)
-                return MoveResult("verified_after_error", error_type)
-            logger.error("IMAP stage=verify_move uid=%s target=%s result=unknown error_type=%s",
-                         uid, actual, error_type)
-            raise MoveUncertainError("move_command", error_type) from exc
+                logger.warning("IMAP stage=verify_move uid=%s target=%s session=%s result=confirmed "
+                               "evidence=independent_imap error_type=%s diagnostic_code=%s",
+                               uid, actual, self._session_id, error_type, diagnostic_code)
+                return MoveResult("verified_after_error", error_type, "verify_move", diagnostic_code,
+                                  phase)
+            logger.error("IMAP stage=verify_move uid=%s target=%s session=%s result=unknown "
+                         "error_type=%s diagnostic_code=%s",
+                         uid, actual, self._session_id, error_type, diagnostic_code)
+            raise MoveUncertainError("move_command", error_type, phase, diagnostic_code) from exc
 
-        logger.info("IMAP stage=move_confirmed uid=%s target=%s evidence=server_ok", uid, actual)
+        logger.info("IMAP stage=move_confirmed uid=%s target=%s session=%s evidence=server_ok",
+                    uid, actual, self._session_id)
         return MoveResult("server_ok")
+
+    def _uidplus_move(self, uid: str, target: str) -> None:
+        """Safe fallback: UID EXPUNGE affects only this UID, never other Deleted mail."""
+        client = self.mailbox.client
+        copy_result = client.uid("COPY", uid, encode_folder(target))
+        check_command_status(copy_result, MailboxCopyError)
+        store_result = client.uid("STORE", uid, "+FLAGS.SILENT", r"(\Deleted)")
+        check_command_status(store_result, MailboxDeleteError)
+        expunge_result = client.uid("EXPUNGE", uid)
+        check_command_status(expunge_result, MailboxExpungeError)
 
     def _verify_move(self, msg: MailMessage, source: str, target: str,
                      source_uidvalidity: int | None, baseline: dict[str, int]) -> bool:

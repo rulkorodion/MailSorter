@@ -63,7 +63,7 @@
       <div class="form-row"><label>Пароль (или пароль приложения)</label><input type="password" id="imap_pass"></div>
       <div class="form-row"><label><input type="checkbox" id="pass_as_env"> Хранить как ENV:MAIL_PASSWORD</label></div>
       <div class="form-row"><label>Папка входящих</label><input type="text" id="inbox_folder" value="INBOX"></div>
-      <div class="form-row"><label>Папка Unsorted</label><input type="text" id="unsorted_folder" value="INBOX/Unsorted"></div>
+      <div class="form-row"><label>Папка Unsorted</label><input type="text" id="unsorted_folder" value="Unsorted"></div>
       <div class="form-row"><label>Интервал опроса (сек)</label><input type="text" id="poll_interval" value="60"></div>
       <div class="toolbar">
         <button type="button" class="btn btn-secondary" onclick="testImap()">🔌 Проверить подключение</button>
@@ -120,9 +120,9 @@ const PRESETS = {
 };
 
 let destinations = [
-  {folder:'INBOX/Work', condition:'Письма по работе, проектам, совещаниям и задачам от коллег'},
-  {folder:'INBOX/Finance', condition:'Счета, платежи, банковские уведомления, бухгалтерия'},
-  {folder:'INBOX/Newsletters', condition:'Рассылки, новости, маркетинг, промо'},
+  {folder:'Работа', condition:'Письма по работе, проектам, совещаниям и задачам от коллег'},
+  {folder:'Финансы', condition:'Счета, платежи, банковские уведомления, бухгалтерия'},
+  {folder:'Рассылки', condition:'Рассылки, новости, маркетинг, промо'},
 ];
 
 function showMsg(t, ok) {
@@ -218,7 +218,7 @@ function renderDest() {
 function esc(s){ const d=document.createElement('div'); d.textContent=s||''; return d.innerHTML; }
 function addDest() {
   collectDest();
-  destinations.push({folder:'INBOX/New', condition:''});
+  destinations.push({folder:'Новая категория', condition:''});
   renderDest();
 }
 function collectDest() {
@@ -243,7 +243,7 @@ async function saveSetup() {
       username: document.getElementById('imap_user').value.trim(),
       password: useEnv ? 'ENV:MAIL_PASSWORD' : document.getElementById('imap_pass').value,
       inbox_folder: document.getElementById('inbox_folder').value.trim()||'INBOX',
-      unsorted_folder: document.getElementById('unsorted_folder').value.trim()||'INBOX/Unsorted',
+      unsorted_folder: document.getElementById('unsorted_folder').value.trim()||'Unsorted',
       poll_interval_seconds: parseInt(document.getElementById('poll_interval').value,10)||60
     },
     llm: {
@@ -266,8 +266,8 @@ async function saveSetup() {
     const r = await fetch('/api/setup', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
     const d = await r.json();
     if (d.ok) {
-      showMsg('Сохранено. Через 2 сек откроется интерфейс — войдите с новым паролем.', true);
-      setTimeout(() => location.href = '/', 2000);
+      showMsg('Сохранено. Перейдите на страницу папок, проверьте структуру и подтвердите создание недостающих. Почта пока не менялась.', true);
+      setTimeout(() => location.href = '/folders', 2000);
     } else {
       showMsg(d.error||'Ошибка', false);
       btn.disabled = false;

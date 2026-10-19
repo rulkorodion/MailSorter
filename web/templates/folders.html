@@ -4,7 +4,7 @@
 
 {% block content %}
 <h1>Папки IMAP</h1>
-<p class="subtitle">Интерактивное дерево: создание, переименование, перемещение, удаление</p>
+<p class="subtitle">Проверка структуры сортировки и управление папками. Проверка не меняет письма.</p>
 
 {% if not status_list %}
 <div class="alert alert-info">Нет загруженных ящиков.</div>
@@ -22,8 +22,8 @@
 <div class="card">
   <div class="toolbar">
     <button class="btn btn-secondary btn-sm" onclick="loadTree()">↻ Обновить</button>
-    <button class="btn btn-secondary btn-sm" onclick="checkFolders(false)">🔍 Проверить правила</button>
-    <button class="btn btn-primary btn-sm" onclick="checkFolders(true)">📁 Создать недостающие из правил</button>
+    <button class="btn btn-secondary btn-sm" onclick="checkFolders(false)">🔍 Проверить структуру</button>
+    <button class="btn btn-primary btn-sm" onclick="checkFolders(true)">📁 Создать недостающие</button>
     <button class="btn btn-success btn-sm" onclick="createRoot()">+ Новая папка</button>
   </div>
   <div id="check-result" style="margin-top:0.5rem"></div>
@@ -67,13 +67,14 @@
 <script>
 let selectedPath = null;
 let delim = '/';
+const csrfToken = {{ csrf_token | tojson }};
 
 function cfg() { return document.getElementById('cfg-file').value; }
 
 function renderNode(n, depth) {
   const has = n.children && n.children.length;
   let html = '<div class="tree-node" data-path="' + escAttr(n.path) + '">';
-  html += '<div class="tree-row" oncontextmenu="openCtx(event,\'' + escAttr(n.path) + '\')" onclick="selectRow(event,\'' + escAttr(n.path) + '\')">';
+  html += '<div class="tree-row" oncontextmenu="openCtx(event,this)" onclick="selectRow(event,this)">';
   html += '<span class="tree-toggle" onclick="toggle(event, this)">' + (has ? '▼' : '·') + '</span>';
   html += (has ? '📂' : '📄') + ' <code>' + esc(n.path) + '</code>';
   html += '</div>';
@@ -89,7 +90,13 @@ function renderNode(n, depth) {
 function esc(s) {
   const d = document.createElement('div'); d.textContent = s; return d.innerHTML;
 }
-function escAttr(s) { return String(s).replace(/\\/g,'\\\\').replace(/'/g, "\\'"); }
+function imapError(code) {
+  return ({PermissionError:'Нет прав IMAP CREATE', MailboxFolderCreateError:'Сервер отклонил IMAP CREATE (проверьте права и имя папки)',
+    OSError:'Ошибка подключения к IMAP', TimeoutError:'Истекло время ожидания IMAP',
+    RuntimeError:'Сервер не подтвердил операцию'})[code] || code || 'Ошибка IMAP';
+}
+function escAttr(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+  .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
 function toggle(e, el) {
   e.stopPropagation();
@@ -100,15 +107,15 @@ function toggle(e, el) {
   el.textContent = hide ? '▶' : '▼';
 }
 
-function selectRow(e, path) {
-  selectedPath = path;
+function selectRow(e, row) {
+  selectedPath = row.parentElement.dataset.path;
   document.querySelectorAll('.tree-row').forEach(r => r.classList.remove('selected'));
   e.currentTarget.classList.add('selected');
 }
 
-function openCtx(e, path) {
+function openCtx(e, row) {
   e.preventDefault();
-  selectedPath = path;
+  selectedPath = row.parentElement.dataset.path;
   const m = document.getElementById('ctx');
   m.style.display = 'block';
   m.style.left = e.clientX + 'px';
@@ -141,7 +148,7 @@ async function createRoot() {
 
 async function apiCreate(name) {
   const r = await fetch('/api/folders/' + encodeURIComponent(cfg()) + '/create', {
-    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name})
+    method:'POST', headers:{'Content-Type':'application/json', 'X-CSRF-Token':csrfToken}, body: JSON.stringify({name})
   });
   const d = await r.json();
   alert(d.ok ? 'Создано: ' + d.name : d.error);
@@ -149,7 +156,7 @@ async function apiCreate(name) {
 }
 async function apiRename(old_name, new_name) {
   const r = await fetch('/api/folders/' + encodeURIComponent(cfg()) + '/rename', {
-    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({old_name, new_name})
+    method:'POST', headers:{'Content-Type':'application/json', 'X-CSRF-Token':csrfToken}, body: JSON.stringify({old_name, new_name})
   });
   const d = await r.json();
   alert(d.ok ? 'Готово' : d.error);
@@ -157,7 +164,7 @@ async function apiRename(old_name, new_name) {
 }
 async function apiDelete(name) {
   const r = await fetch('/api/folders/' + encodeURIComponent(cfg()) + '/delete', {
-    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name})
+    method:'POST', headers:{'Content-Type':'application/json', 'X-CSRF-Token':csrfToken}, body: JSON.stringify({name})
   });
   const d = await r.json();
   alert(d.ok ? 'Удалено' : d.error);
@@ -180,19 +187,39 @@ async function loadTree() {
 
 async function checkFolders(create) {
   const box = document.getElementById('check-result');
+  let confirmation = '';
+  if (create) {
+    confirmation = prompt('Для создания только недостающих папок в ящике «' + cfg() + '» введите CREATE ' + cfg() + ':') || '';
+    if (confirmation !== 'CREATE ' + cfg()) return;
+  }
   box.innerHTML = '<div class="alert alert-info">...</div>';
-  const r = await fetch('/api/check-folders?file=' + encodeURIComponent(cfg()) + '&create=' + create, {method:'POST'});
-  const d = await r.json();
-  let html = '<table><tr><th>Папка</th><th>Статус</th></tr>';
+  let d;
+  try {
+    const r = await fetch('/api/check-folders?file=' + encodeURIComponent(cfg()) + '&create=' + create,
+      {method:'POST', headers:{'Content-Type':'application/json', 'X-CSRF-Token':csrfToken},
+       body:JSON.stringify({confirmation})});
+    d = await r.json();
+    if (!r.ok || !d.ok) { box.innerHTML = '<div class="alert alert-error">Проверка не выполнена: ' +
+      esc(d.detail || d.error || (d.errors||[]).map(imapError).join(', ') || 'Ошибка IMAP') + '</div>'; return; }
+  } catch(e) { box.textContent = 'Ошибка подключения или ответа сервера'; return; }
+  let html = '<div class="alert alert-'+(d.ready?'success':'info')+'">'+
+    (d.ready?'Ящик готов к сортировке':'Структура не готова: есть отсутствующие папки или ошибки')+'</div>';
+  html += '<table><tr><th>Полный IMAP-путь</th><th>Статус</th></tr>';
   (d.folders||[]).forEach(f => {
     const color = f.status==='exists'?'var(--success)':f.status==='created'?'var(--accent)':f.status==='missing'?'var(--warning)':'var(--danger)';
-    html += '<tr><td>'+esc(f.name)+'</td><td style="color:'+color+'">'+f.status+(f.error?': '+esc(f.error):'')+'</td></tr>';
+    const status = {exists:'Существует', created:'Создана', missing:'Отсутствует', error:'Ошибка создания'}[f.status] || f.status;
+    html += '<tr><td><code>'+esc(f.actual||f.path||f.name)+'</code></td><td style="color:'+color+'">'+
+      esc(status)+(f.error?': '+esc(imapError(f.error)):'')+'</td></tr>';
   });
   html += '</table>';
+  html += '<p class="hint">Существуют: '+(d.existing||[]).length+', отсутствуют: '+(d.missing||[]).length+
+    ', созданы: '+(d.created||[]).length+', ошибки создания: '+(d.failed||[]).length+'</p>';
+  if ((d.server_folders||[]).length) html += '<details><summary>Все папки сервера</summary><div class="hint">'+
+    d.server_folders.map(f=>'<div><code>'+esc(f)+'</code></div>').join('')+'</div></details>';
   box.innerHTML = html;
   if (create) loadTree();
 }
 
-if (document.getElementById('cfg-file')) loadTree();
+if (document.getElementById('cfg-file')) { loadTree(); checkFolders(false); }
 </script>
 {% endblock %}

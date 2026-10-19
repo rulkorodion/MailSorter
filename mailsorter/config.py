@@ -228,6 +228,8 @@ class LoggingConfig(BaseModel):
 
 class MailboxConfig(BaseModel):
     name: str
+    # Missing in historical YAML means that its existing folder paths remain unchanged.
+    folder_layout: Literal["legacy", "inbox"] = "legacy"
     imap: ImapConfig
     llm: LlmConfig = Field(default_factory=LlmConfig)
     rules: RulesConfig

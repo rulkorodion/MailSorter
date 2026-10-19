@@ -23,6 +23,28 @@ MAX_DNS_ADDRESSES = 8
 MAX_ADDRESS_SECONDS = 10
 
 
+def destination_path(folder: str, layout: str, inbox: str, delimiter: str) -> str:
+    """Resolve a rule's logical name to one server path; explicit paths stay explicit."""
+    if not folder or not folder.strip() or not delimiter:
+        raise ValueError("Пустой путь папки")
+    folder = folder.strip()
+    if any(ord(char) < 32 for char in folder):
+        raise ValueError("Недопустимый символ в имени папки")
+    # Configuration paths use /; imap-tools accepts Unicode and handles IMAP UTF-7.
+    explicit = "/" in folder or "\\" in folder or delimiter in folder
+    normalized = folder.replace("\\", "/")
+    if delimiter != "/":
+        normalized = normalized.replace("/", delimiter)
+    parts = normalized.split(delimiter)
+    if any(not part or part in {".", ".."} for part in parts):
+        raise ValueError("Недопустимый путь папки")
+    if parts[0].casefold() == "inbox":
+        parts[0] = inbox
+    elif layout == "inbox" and not explicit:
+        parts.insert(0, inbox)
+    return delimiter.join(parts)
+
+
 @dataclass(frozen=True)
 class MoveResult:
     evidence: str  # server_ok or verified_after_error
@@ -288,6 +310,10 @@ class ImapClient:
             logger.warning("Не удалось получить список папок: %s", type(e).__name__)
             return []
 
+    def folder_snapshot(self) -> list[str]:
+        """LIST must succeed for preparation and MOVE; never infer absence on failure."""
+        return [entry.name for entry in self.mailbox.folder.list()]
+
     def _resolve_folder_name(self, wanted: str, folders: list[str] | None = None) -> str | None:
         if folders is None:
             folders = self.list_folders()
@@ -295,18 +321,21 @@ class ImapClient:
             return None
         if wanted in folders:
             return wanted
-        lower_map = {f.lower(): f for f in folders}
-        if wanted.lower() in lower_map:
-            return lower_map[wanted.lower()]
-        if wanted.upper() == "INBOX" and "inbox" in lower_map:
+        lower_map = {f.casefold(): f for f in folders}
+        if wanted.casefold() in lower_map:
+            return lower_map[wanted.casefold()]
+        if wanted.casefold() == "inbox" and "inbox" in lower_map:
             return lower_map["inbox"]
         return None
 
-    def ensure_folder(self, folder: str) -> str:
-        existing = self.list_folders()
+    def ensure_folder(self, folder: str, create: bool = False) -> str:
+        folder = destination_path(folder, "legacy", self.cfg.inbox_folder, self._folder_delimiter)
+        existing = self.folder_snapshot()
         resolved = self._resolve_folder_name(folder, existing)
         if resolved:
             return resolved
+        if not create:
+            raise FileNotFoundError("Целевая IMAP-папка отсутствует")
         norm = folder.replace("\\", "/").replace("/", self._folder_delimiter)
         parts = [p for p in norm.split(self._folder_delimiter) if p]
         current = ""
@@ -321,7 +350,7 @@ class ImapClient:
                 logger.info("Создана папка: %s", current)
                 existing.append(current)
             except Exception as e:
-                existing = self.list_folders()
+                existing = self.folder_snapshot()
                 found = self._resolve_folder_name(current, existing)
                 if found:
                     current = found
@@ -337,6 +366,7 @@ class ImapClient:
         return self.fetch_folder_messages(self.cfg.inbox_folder, limit=limit)
 
     def fetch_folder_messages(self, folder: str, limit: int = 50) -> list[MailMessage]:
+        folder = destination_path(folder, "legacy", self.cfg.inbox_folder, self._folder_delimiter)
         existing = self.list_folders()
         actual = self._resolve_folder_name(folder, existing)
         if not actual:
@@ -472,10 +502,11 @@ class ImapClient:
             return False
 
     def create_folder(self, folder: str) -> str:
-        return self.ensure_folder(folder)
+        return self.ensure_folder(folder, create=True)
 
     def delete_folder(self, folder: str) -> None:
-        existing = self.list_folders()
+        folder = destination_path(folder, "legacy", self.cfg.inbox_folder, self._folder_delimiter)
+        existing = self.folder_snapshot()
         actual = self._resolve_folder_name(folder, existing)
         if not actual:
             raise RuntimeError(f"Папка «{folder}» не найдена")
@@ -489,7 +520,9 @@ class ImapClient:
         logger.info("Удалена папка: %s", actual)
 
     def rename_folder(self, old_name: str, new_name: str) -> None:
-        existing = self.list_folders()
+        old_name = destination_path(old_name, "legacy", self.cfg.inbox_folder, self._folder_delimiter)
+        new_name = destination_path(new_name, "legacy", self.cfg.inbox_folder, self._folder_delimiter)
+        existing = self.folder_snapshot()
         actual = self._resolve_folder_name(old_name, existing)
         if not actual:
             raise RuntimeError(f"Папка «{old_name}» не найдена")

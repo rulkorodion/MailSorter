@@ -3,6 +3,7 @@
 # ============================================================
 
 name: "Пример ящика"
+folder_layout: inbox  # новые ящики: простые имена категорий внутри INBOX
 
 imap:
   host: "outlook.office365.com"
@@ -10,7 +11,7 @@ imap:
   username: "user@example.com"
   password: "ENV:MAIL_PASSWORD"
   inbox_folder: "INBOX"
-  unsorted_folder: "INBOX/Unsorted"
+  unsorted_folder: "Unsorted"
   poll_interval_seconds: 60
   ssl_verify: true
 
@@ -39,9 +40,9 @@ rules:
   source_folder: "INBOX"
   confidence_threshold: 0.75
   destinations:
-    - folder: "INBOX/Work"
+    - folder: "Работа"
       condition: "Рабочие задачи и проекты"
-    - folder: "INBOX/Finance"
+    - folder: "Финансы"
       condition: "Счета и бухгалтерия"
 
 web:

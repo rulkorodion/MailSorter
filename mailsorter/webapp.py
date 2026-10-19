@@ -30,7 +30,7 @@ from .config import (
     write_raw_yaml,
 )
 from .exchange import PRESETS, autodiscover_microsoft
-from .imap_client import ImapClient
+from .imap_client import ImapClient, destination_path
 from .llm_client import LlmClient, LlmError
 from .manager import manager
 from .sorter import MailSorter, resolve_destination
@@ -51,6 +51,16 @@ security = HTTPBasic(auto_error=False)
 
 _web_user = "admin"
 _web_pass = "CHANGE_ME"
+_folder_csrf_token = secrets.token_urlsafe(32)
+
+
+def _require_folder_csrf(request: Request) -> None:
+    token = request.headers.get("x-csrf-token", "")
+    if not secrets.compare_digest(token, _folder_csrf_token):
+        raise HTTPException(status_code=403, detail="Недопустимый CSRF-токен")
+    origin = request.headers.get("origin")
+    if origin and urlsplit(origin).netloc.casefold() != request.headers.get("host", "").casefold():
+        raise HTTPException(status_code=403, detail="Недопустимый источник запроса")
 
 
 def is_setup_mode() -> bool:
@@ -144,6 +154,17 @@ def _get_sorter(filename: str) -> MailSorter:
     return MailSorter(cfg)
 
 
+def _protect_configured_folders(cfg: Any, imap: ImapClient) -> None:
+    inbox = imap.cfg.inbox_folder
+    delimiter = imap._folder_delimiter
+    imap.protected_folders = [
+        destination_path(cfg.imap.inbox_folder, "legacy", inbox, delimiter),
+        destination_path(cfg.rules.source_folder, "legacy", inbox, delimiter),
+        destination_path(cfg.imap.unsorted_folder, cfg.folder_layout, inbox, delimiter),
+    ] + [destination_path(d.folder, cfg.folder_layout, inbox, delimiter)
+         for d in cfg.rules.destinations]
+
+
 def _build_config_yaml(data: dict[str, Any]) -> str:
     cats = data.get("destinations") or data.get("categories") or []
     destinations = []
@@ -166,6 +187,7 @@ def _build_config_yaml(data: dict[str, Any]) -> str:
 
     doc = {
         "name": data.get("name") or "Основной ящик",
+        "folder_layout": "inbox",
         "imap": {
             "host": imap["host"],
             "port": int(imap.get("port", 993)),
@@ -256,7 +278,8 @@ async def page_folders(request: Request, user: str = Depends(verify_auth)):
         return RedirectResponse(url="/setup", status_code=302)
     return templates.TemplateResponse(
         request, "folders.html",
-        {"status_list": manager.get_status(), "user": user},
+        {"status_list": manager.get_status(), "user": user, "csrf_token": _folder_csrf_token},
+        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -480,6 +503,7 @@ async def api_create_config(request: Request, user: str = Depends(verify_auth)):
     try:
         raw = yaml.safe_load(text)
         if isinstance(raw, dict):
+            raw.setdefault("folder_layout", "inbox")
             _hash_web_password(raw)
             text = yaml.safe_dump(raw, allow_unicode=True, sort_keys=False)
     except yaml.YAMLError:
@@ -514,7 +538,13 @@ async def api_validate(request: Request, user: str = Depends(verify_auth)):
 # -------------------- Folders --------------------
 
 @app.post("/api/check-folders")
-async def api_check_folders(file: str, create: bool = False, user: str = Depends(verify_auth)):
+async def api_check_folders(file: str, request: Request, create: bool = False,
+                            user: str = Depends(verify_auth)):
+    _require_folder_csrf(request)
+    if create:
+        body = await request.json()
+        if not secrets.compare_digest(str(body.get("confirmation", "")), f"CREATE {file}"):
+            raise HTTPException(status_code=400, detail="Требуется подтверждение создания папок")
     return _get_sorter(file).check_folders(create=create)
 
 
@@ -525,6 +555,7 @@ async def api_list_folders(filename: str, user: str = Depends(verify_auth)):
 
 @app.post("/api/folders/{filename}/create")
 async def api_folder_create(filename: str, request: Request, user: str = Depends(verify_auth)):
+    _require_folder_csrf(request)
     body = await request.json()
     name = (body.get("name") or "").strip()
     if not name:
@@ -539,13 +570,13 @@ async def api_folder_create(filename: str, request: Request, user: str = Depends
 
 @app.post("/api/folders/{filename}/delete")
 async def api_folder_delete(filename: str, request: Request, user: str = Depends(verify_auth)):
+    _require_folder_csrf(request)
     body = await request.json()
     name = (body.get("name") or "").strip()
     try:
         cfg = _get_sorter(filename).config
-        protected = [cfg.imap.inbox_folder, cfg.imap.unsorted_folder, cfg.rules.source_folder]
-        protected.extend(d.folder for d in cfg.rules.destinations)
-        with ImapClient(cfg.imap, protected_folders=protected) as imap:
+        with ImapClient(cfg.imap) as imap:
+            _protect_configured_folders(cfg, imap)
             imap.delete_folder(name)
         return {"ok": True}
     except Exception as e:
@@ -554,14 +585,14 @@ async def api_folder_delete(filename: str, request: Request, user: str = Depends
 
 @app.post("/api/folders/{filename}/rename")
 async def api_folder_rename(filename: str, request: Request, user: str = Depends(verify_auth)):
+    _require_folder_csrf(request)
     body = await request.json()
     old_name = (body.get("old_name") or "").strip()
     new_name = (body.get("new_name") or "").strip()
     try:
         cfg = _get_sorter(filename).config
-        protected = [cfg.imap.inbox_folder, cfg.imap.unsorted_folder, cfg.rules.source_folder]
-        protected.extend(d.folder for d in cfg.rules.destinations)
-        with ImapClient(cfg.imap, protected_folders=protected) as imap:
+        with ImapClient(cfg.imap) as imap:
+            _protect_configured_folders(cfg, imap)
             imap.rename_folder(old_name, new_name)
         return {"ok": True}
     except Exception as e:

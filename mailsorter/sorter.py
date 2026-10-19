@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any
 
 from .config import MailboxConfig, build_system_prompt
-from .imap_client import ImapClient, MoveNotStartedError, MoveUncertainError
+from .imap_client import ImapClient, MoveNotStartedError, MoveUncertainError, destination_path
 from .llm_client import LlmClient
 from .move_journal import MoveJournal
 
@@ -97,7 +97,10 @@ class MailSorter:
 
                 threshold = self.config.rules.confidence_threshold
                 max_retries = 1 if llm_cfg.provider == "cloudru" else llm_cfg.max_retries
-                unsorted = self.config.imap.unsorted_folder
+                delimiter = getattr(imap, "_folder_delimiter", "/")
+                inbox = getattr(getattr(imap, "cfg", None), "inbox_folder", self.config.imap.inbox_folder)
+                unsorted = destination_path(self.config.imap.unsorted_folder,
+                                            self.config.folder_layout, inbox, delimiter)
 
                 for msg in messages:
                     self.stats.processed += 1
@@ -130,7 +133,9 @@ class MailSorter:
                             self.stats.details.append(detail)
                             continue
 
-                        category, confidence, destination = resolve_destination(result, self.config)
+                        category, confidence, logical_destination = resolve_destination(result, self.config)
+                        destination = destination_path(logical_destination, self.config.folder_layout,
+                                                       inbox, delimiter)
                         detail.update(category=category, confidence=confidence, folder=destination)
                         if category == "":
                             detail["decision"] = "no_matching_category"
@@ -228,34 +233,56 @@ class MailSorter:
             return {"ok": False, "message": type(e).__name__}
 
     def check_folders(self, create: bool = False) -> dict[str, Any]:
-        result: dict[str, Any] = {"ok": True, "folders": [], "errors": []}
+        result: dict[str, Any] = {"ok": False, "ready": False, "folders": [], "errors": [],
+                                  "existing": [], "missing": [], "created": [], "failed": []}
         try:
             with ImapClient(self.config.imap) as imap:
-                existing = set(imap.list_folders())
-                needed = [self.config.imap.unsorted_folder, self.config.rules.source_folder]
-                needed += [d.folder for d in self.config.rules.destinations]
+                delimiter = imap._folder_delimiter
+                inbox = imap.cfg.inbox_folder
+                result["delimiter"] = delimiter
+                existing = imap.folder_snapshot()
+                result["server_folders"] = existing
+                source = destination_path(self.config.rules.source_folder, "legacy", inbox, delimiter)
+                wanted = [(source, False)]
+                wanted.extend((destination_path(d.folder, self.config.folder_layout, inbox, delimiter), True)
+                              for d in self.config.rules.destinations)
+                wanted.append((destination_path(self.config.imap.unsorted_folder,
+                                                self.config.folder_layout, inbox, delimiter), True))
                 seen: set[str] = set()
-                unique = []
-                for f in needed:
-                    if f and f not in seen:
-                        seen.add(f)
-                        unique.append(f)
-                for folder in unique:
-                    found = imap._resolve_folder_name(folder, list(existing))
+                for folder, manageable in wanted:
+                    if folder.casefold() in seen:
+                        continue
+                    seen.add(folder.casefold())
+                    found = imap._resolve_folder_name(folder, existing)
+                    item = {"name": folder, "path": folder}
                     if found:
-                        result["folders"].append({"name": folder, "status": "exists", "actual": found})
-                    elif create:
+                        item.update(status="exists", actual=found)
+                        result["existing"].append(found)
+                    elif create and manageable and imap._resolve_folder_name(source, existing):
                         try:
-                            actual = imap.ensure_folder(folder)
-                            existing.add(actual)
-                            result["folders"].append({"name": folder, "status": "created", "actual": actual})
-                        except Exception as e:
-                            result["ok"] = False
-                            result["folders"].append({"name": folder, "status": "error", "error": type(e).__name__})
-                            result["errors"].append(type(e).__name__)
+                            imap.create_folder(folder)
+                            # Verify with a fresh LIST rather than trusting CREATE alone.
+                            existing = imap.folder_snapshot()
+                            actual = imap._resolve_folder_name(folder, existing)
+                            if not actual:
+                                raise RuntimeError("IMAP CREATE не подтверждён LIST")
+                            item.update(status="created", actual=actual)
+                            result["created"].append(actual)
+                        except Exception as exc:
+                            item.update(status="error", error=type(exc).__name__)
+                            result["failed"].append(folder)
+                            result["errors"].append(type(exc).__name__)
                     else:
-                        result["ok"] = False
-                        result["folders"].append({"name": folder, "status": "missing"})
+                        item["status"] = "missing"
+                        result["missing"].append(folder)
+                    result["folders"].append(item)
+                # A final LIST is authoritative even after partial success.
+                final = imap.folder_snapshot()
+                result["server_folders"] = final
+                result["ready"] = not result["failed"] and all(
+                    imap._resolve_folder_name(item["path"], final) for item in result["folders"]
+                )
+                result["ok"] = True
         except Exception as e:
             result["ok"] = False
             result["errors"].append(type(e).__name__)

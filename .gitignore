@@ -1,4 +1,4 @@
-# Python
+# Python и инструменты разработки
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -12,22 +12,32 @@ dist/
 venv/
 .venv/
 
-# Local mailbox configuration and secrets
-configs/*.yaml
-configs/*.yml
+# Локальные настройки и секреты
+configs/*.yaml*
+configs/*.yml*
 !configs/*.yaml.example
 !configs/*.yml.example
 .env
 .env.*
+*.env
+*.env.*
+*.token
+*.secrets.*
 *.pem
 *.key
 *.pfx
 *.p12
+*.p8
 
-# Runtime data
+# Рабочие данные, журналы и почтовые выгрузки
 logs/*
 !logs/.gitkeep
 *.log
+*.jsonl
+*.eml
+*.mbox
+*.pst
+*.ost
 *.db
 *.sqlite
 *.sqlite3
@@ -36,7 +46,7 @@ logs/*
 *.swp
 ~$*
 
-# Editor and OS
+# Редакторы и операционная система
 .idea/
 .vscode/
 .DS_Store
